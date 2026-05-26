@@ -40,14 +40,20 @@ async function loadConfig() {
 async function saveConfig(payload) {
   if (!SUPABASE_READY) {
     console.warn('[SUPABASE] Cannot save — env vars not set')
-    return
+    return false
   }
   try {
-    await supabase
+    const { error } = await supabase
       .from('config')
       .upsert({ id: CONFIG_ROW_ID, data: payload, updated_at: new Date().toISOString() })
+    if (error) {
+      console.error('[SUPABASE] saveConfig error:', error.message, error.details)
+      return false
+    }
+    return true
   } catch (e) {
     console.error('[SUPABASE] saveConfig error:', e.message)
+    return false
   }
 }
 
@@ -467,8 +473,12 @@ app.post('/api/config', async (req, res) => {
 
   const cfg = await loadConfig()
   cfg.automation = { ...body, updated_at: new Date().toISOString() }
-  await saveConfig(cfg)
-  console.log(`[CONFIG] Saved: active=${cfg.automation.active}, name="${cfg.automation.name}"`)
+  const ok = await saveConfig(cfg)
+  if (!ok) {
+    console.error(`[CONFIG] Supabase write FAILED for active=${body.active}, name="${body.name}"`)
+    return res.status(500).json({ success: false, error: 'Database write failed' })
+  }
+  console.log(`[CONFIG] Saved OK: active=${cfg.automation.active}, name="${cfg.automation.name}"`)
   res.json({ success: true, saved_at: new Date().toISOString() })
 })
 
