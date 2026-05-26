@@ -37,6 +37,12 @@ app.use((req, res, next) => {
   next()
 })
 
+// Log every incoming request so we can debug routing in Netlify
+app.use((req, res, next) => {
+  console.log(`[REQ] ${req.method} ${req.path} | body.object=${req.body?.object} | body keys=${Object.keys(req.body || {}).slice(0,5).join(',')}`)
+  next()
+})
+
 async function loadConfig() {
   if (!SUPABASE_READY) return {}
   try {
@@ -384,7 +390,11 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200) // always respond 200 immediately
 
   const body = req.body
-  if (body.object !== 'instagram') return
+  console.log(`[WEBHOOK POST] object=${body?.object} | entry count=${body?.entry?.length}`)
+  if (body.object !== 'instagram') {
+    console.log(`[WEBHOOK SKIP] object is "${body?.object}" not "instagram"`)
+    return
+  }
 
   for (const entry of body.entry || []) {
     for (const change of entry.changes || []) {
