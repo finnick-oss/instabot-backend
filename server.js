@@ -22,7 +22,20 @@ const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || 'instabot_verif
 
 const app = express()
 app.use(cors())
-app.use(express.json())
+
+// serverless-http (Netlify) delivers req.body as a raw Buffer before express.json() runs,
+// so express.json() skips parsing and the Buffer stays. We handle all cases explicitly.
+app.use(express.raw({ type: '*/*', limit: '2mb' }))
+app.use((req, res, next) => {
+  if (req.body && Buffer.isBuffer(req.body)) {
+    const str = req.body.toString('utf8').trim()
+    try { req.body = str ? JSON.parse(str) : {} } catch { req.body = {} }
+  } else if (typeof req.body === 'string') {
+    const str = req.body.trim()
+    try { req.body = str ? JSON.parse(str) : {} } catch { req.body = {} }
+  }
+  next()
+})
 
 async function loadConfig() {
   if (!SUPABASE_READY) return {}
@@ -464,12 +477,14 @@ app.delete('/api/config', async (req, res) => {
 })
 
 app.post('/api/config', async (req, res) => {
-  // Safely handle body — could be string if content-type was wrong
+  // Final safety net — middleware above handles this but belt-and-suspenders
   let body = req.body
-  if (typeof body === 'string') {
+  if (Buffer.isBuffer(body)) {
+    try { body = JSON.parse(body.toString('utf8')) } catch { body = {} }
+  } else if (typeof body === 'string') {
     try { body = JSON.parse(body) } catch { body = {} }
   }
-  if (typeof body !== 'object' || Array.isArray(body)) body = {}
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Buffer.isBuffer(body)) body = {}
 
   const cfg = await loadConfig()
   cfg.automation = { ...body, updated_at: new Date().toISOString() }
