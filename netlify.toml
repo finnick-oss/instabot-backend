@@ -1,0 +1,16 @@
+[build]
+  command = "npm install"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/api/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/webhook"
+  to = "/.netlify/functions/api/webhook"
+  status = 200
