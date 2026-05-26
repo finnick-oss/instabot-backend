@@ -410,12 +410,12 @@ const MOCK_POSTS = [
 app.get('/api/posts', async (req, res) => {
   try {
     const { data } = await axios.get(`${IG_BASE}/${IG_ACCOUNT_ID}/media`, {
-      params: { fields: 'id,caption,media_type,thumbnail_url,permalink,timestamp', limit: 50, access_token: TOKEN },
+      params: { fields: 'id,caption,media_type,thumbnail_url,media_url,permalink,timestamp', limit: 50, access_token: TOKEN },
       timeout: 10000
     })
     const posts = (data.data || []).map(p => ({
       id: p.id, media_type: p.media_type, caption: p.caption || '',
-      thumbnail_url: p.thumbnail_url || null, permalink: p.permalink, timestamp: p.timestamp
+      thumbnail_url: p.thumbnail_url || p.media_url || null, permalink: p.permalink, timestamp: p.timestamp
     }))
     res.json({ posts, source: 'instagram' })
   } catch (err) {
@@ -453,7 +453,7 @@ app.post('/api/config', async (req, res) => {
 app.post('/api/sync', async (req, res) => {
   try {
     const { data } = await axios.get(`${IG_BASE}/${IG_ACCOUNT_ID}/media`, {
-      params: { fields: 'id,caption,media_type,thumbnail_url,permalink,timestamp', limit: 50, access_token: TOKEN },
+      params: { fields: 'id,caption,media_type,thumbnail_url,media_url,permalink,timestamp', limit: 50, access_token: TOKEN },
       timeout: 10000
     })
     const posts = data.data || []
