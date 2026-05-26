@@ -449,6 +449,14 @@ app.get('/api/config', async (req, res) => {
   res.json(cfg.automation || {})
 })
 
+app.delete('/api/config', async (req, res) => {
+  const cfg = await loadConfig()
+  delete cfg.automation
+  await saveConfig(cfg)
+  console.log('[CONFIG] Automation deleted')
+  res.json({ success: true })
+})
+
 app.post('/api/config', async (req, res) => {
   // Safely handle body — could be string if content-type was wrong
   let body = req.body
