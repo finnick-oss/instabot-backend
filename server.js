@@ -375,6 +375,16 @@ app.post('/webhook', async (req, res) => {
   }
 })
 
+// ─── ROOT ─────────────────────────────────────────────────────────────────────
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    name: 'InstaBot API',
+    version: '1.0.0',
+    endpoints: ['/api/health', '/api/posts', '/api/stats', '/api/config', '/api/sync', '/webhook']
+  })
+})
+
 // ─── ADMIN API ENDPOINTS ──────────────────────────────────────────────────────
 
 const MOCK_POSTS = [
