@@ -6,11 +6,13 @@ import { createClient } from '@supabase/supabase-js'
 
 dotenv.config()
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-)
-const CONFIG_ROW_ID = 1  // single-row config table
+const SUPABASE_READY = !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY)
+const supabase = SUPABASE_READY
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY)
+  : null
+const CONFIG_ROW_ID = 1
+
+if (!SUPABASE_READY) console.warn('[SUPABASE] env vars missing — config will not persist!')
 
 const IG_BASE = 'https://graph.facebook.com/v18.0'
 const TOKEN = process.env.INSTAGRAM_ACCESS_TOKEN
@@ -23,6 +25,7 @@ app.use(cors())
 app.use(express.json())
 
 async function loadConfig() {
+  if (!SUPABASE_READY) return {}
   try {
     const { data, error } = await supabase
       .from('config')
@@ -35,6 +38,10 @@ async function loadConfig() {
 }
 
 async function saveConfig(payload) {
+  if (!SUPABASE_READY) {
+    console.warn('[SUPABASE] Cannot save — env vars not set')
+    return
+  }
   try {
     await supabase
       .from('config')
@@ -472,8 +479,14 @@ app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
     token_set: !!TOKEN,
-    supabase_connected: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
-    webhook_verify_token: WEBHOOK_VERIFY_TOKEN
+    account_id_set: !!IG_ACCOUNT_ID,
+    supabase_connected: SUPABASE_READY,
+    webhook_verify_token: WEBHOOK_VERIFY_TOKEN,
+    issues: [
+      !TOKEN && 'INSTAGRAM_ACCESS_TOKEN not set',
+      !IG_ACCOUNT_ID && 'INSTAGRAM_ACCOUNT_ID not set',
+      !SUPABASE_READY && 'SUPABASE_URL or SUPABASE_ANON_KEY not set — config will not persist',
+    ].filter(Boolean)
   })
 })
 
