@@ -2,14 +2,13 @@ import express from 'express'
 import cors from 'cors'
 import axios from 'axios'
 import dotenv from 'dotenv'
-import { readFileSync, writeFileSync, existsSync } from 'fs'
-import { join, dirname } from 'path'
-import { fileURLToPath } from 'url'
 
 dotenv.config()
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const CONFIG_FILE = join(__dirname, '.automation-config.json')
+// In-memory config store (persists within a warm function instance)
+// Note: resets on cold starts — use Netlify env vars for critical config
+let _memConfig = {}
+
 const IG_BASE = 'https://graph.facebook.com/v18.0'
 const TOKEN = process.env.INSTAGRAM_ACCESS_TOKEN
 const IG_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID
@@ -21,12 +20,10 @@ app.use(cors())
 app.use(express.json())
 
 function loadConfig() {
-  try {
-    return existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) : {}
-  } catch { return {} }
+  return _memConfig
 }
 function saveConfig(data) {
-  try { writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2)) } catch {}
+  _memConfig = data
 }
 
 function logInteraction(entry) {
