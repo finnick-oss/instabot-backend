@@ -2,12 +2,15 @@ import express from 'express'
 import cors from 'cors'
 import axios from 'axios'
 import dotenv from 'dotenv'
+import { createClient } from '@supabase/supabase-js'
 
 dotenv.config()
 
-// In-memory config store (persists within a warm function instance)
-// Note: resets on cold starts — use Netlify env vars for critical config
-let _memConfig = {}
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+)
+const CONFIG_ROW_ID = 1  // single-row config table
 
 const IG_BASE = 'https://graph.facebook.com/v18.0'
 const TOKEN = process.env.INSTAGRAM_ACCESS_TOKEN
@@ -19,19 +22,34 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
-function loadConfig() {
-  return _memConfig
-}
-function saveConfig(data) {
-  _memConfig = data
+async function loadConfig() {
+  try {
+    const { data, error } = await supabase
+      .from('config')
+      .select('data')
+      .eq('id', CONFIG_ROW_ID)
+      .single()
+    if (error || !data) return {}
+    return data.data || {}
+  } catch { return {} }
 }
 
-function logInteraction(entry) {
-  const cfg = loadConfig()
+async function saveConfig(payload) {
+  try {
+    await supabase
+      .from('config')
+      .upsert({ id: CONFIG_ROW_ID, data: payload, updated_at: new Date().toISOString() })
+  } catch (e) {
+    console.error('[SUPABASE] saveConfig error:', e.message)
+  }
+}
+
+async function logInteraction(entry) {
+  const cfg = await loadConfig()
   if (!cfg.interaction_log) cfg.interaction_log = []
   cfg.interaction_log.unshift({ ...entry, logged_at: new Date().toISOString() })
   if (cfg.interaction_log.length > 500) cfg.interaction_log = cfg.interaction_log.slice(0, 500)
-  saveConfig(cfg)
+  await saveConfig(cfg)
 }
 
 // Replace {name} placeholder
@@ -153,7 +171,7 @@ async function getUserName(userId) {
 
 // Core automation: handle a new comment
 async function handleComment(commentId, postId, commentText, commenterId, commenterName) {
-  const cfg = loadConfig()
+  const cfg = await loadConfig()
   const automation = cfg.automation
 
   console.log(`[WEBHOOK] Comment on post ${postId} from ${commenterName} (${commenterId}): "${commentText}"`)
@@ -295,7 +313,7 @@ async function handleComment(commentId, postId, commentText, commenterId, commen
 // Handle postback (user clicked "I Followed" or similar)
 async function handlePostback(senderId, payload) {
   if (payload !== 'USER_FOLLOWED') return
-  const cfg = loadConfig()
+  const cfg = await loadConfig()
   const automation = cfg.automation
   if (!automation?.active) return
 
@@ -407,8 +425,8 @@ app.get('/api/posts', async (req, res) => {
   }
 })
 
-app.get('/api/stats', (req, res) => {
-  const cfg = loadConfig()
+app.get('/api/stats', async (req, res) => {
+  const cfg = await loadConfig()
   const log = cfg.interaction_log || []
   res.json({
     comments_replied: log.filter(r => r.comment_replied).length,
@@ -419,15 +437,15 @@ app.get('/api/stats', (req, res) => {
   })
 })
 
-app.get('/api/config', (req, res) => {
-  const cfg = loadConfig()
+app.get('/api/config', async (req, res) => {
+  const cfg = await loadConfig()
   res.json(cfg.automation || {})
 })
 
-app.post('/api/config', (req, res) => {
-  const cfg = loadConfig()
+app.post('/api/config', async (req, res) => {
+  const cfg = await loadConfig()
   cfg.automation = { ...req.body, updated_at: new Date().toISOString() }
-  saveConfig(cfg)
+  await saveConfig(cfg)
   console.log(`[CONFIG] Saved automation: active=${cfg.automation.active}, target=${cfg.automation.post_target}`)
   res.json({ success: true, saved_at: new Date().toISOString() })
 })
@@ -439,10 +457,10 @@ app.post('/api/sync', async (req, res) => {
       timeout: 10000
     })
     const posts = data.data || []
-    const cfg = loadConfig()
+    const cfg = await loadConfig()
     cfg.posts_cache = posts
     cfg.posts_synced_at = new Date().toISOString()
-    saveConfig(cfg)
+    await saveConfig(cfg)
     res.json({ success: true, count: posts.length, source: 'instagram' })
   } catch (err) {
     const igErr = err.response?.data?.error
@@ -451,12 +469,17 @@ app.post('/api/sync', async (req, res) => {
 })
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, token_set: !!TOKEN, webhook_verify_token: WEBHOOK_VERIFY_TOKEN })
+  res.json({
+    ok: true,
+    token_set: !!TOKEN,
+    supabase_connected: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
+    webhook_verify_token: WEBHOOK_VERIFY_TOKEN
+  })
 })
 
 // GET /api/log — recent interactions
-app.get('/api/log', (req, res) => {
-  const cfg = loadConfig()
+app.get('/api/log', async (req, res) => {
+  const cfg = await loadConfig()
   res.json(cfg.interaction_log || [])
 })
 
