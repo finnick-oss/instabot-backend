@@ -450,10 +450,17 @@ app.get('/api/config', async (req, res) => {
 })
 
 app.post('/api/config', async (req, res) => {
+  // Safely handle body — could be string if content-type was wrong
+  let body = req.body
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body) } catch { body = {} }
+  }
+  if (typeof body !== 'object' || Array.isArray(body)) body = {}
+
   const cfg = await loadConfig()
-  cfg.automation = { ...req.body, updated_at: new Date().toISOString() }
+  cfg.automation = { ...body, updated_at: new Date().toISOString() }
   await saveConfig(cfg)
-  console.log(`[CONFIG] Saved automation: active=${cfg.automation.active}, target=${cfg.automation.post_target}`)
+  console.log(`[CONFIG] Saved: active=${cfg.automation.active}, name="${cfg.automation.name}"`)
   res.json({ success: true, saved_at: new Date().toISOString() })
 })
 
