@@ -546,6 +546,100 @@ app.get('/api/log', async (req, res) => {
   res.json(cfg.interaction_log || [])
 })
 
+// ─── AUTH ─────────────────────────────────────────────────────────────────────
+
+// GET /api/me — identity of the connected (owner) Instagram account.
+// Used by the frontend sign-in until per-user OAuth is live.
+app.get('/api/me', async (req, res) => {
+  try {
+    const { data } = await axios.get(`${IG_BASE}/${IG_ACCOUNT_ID}`, {
+      params: { fields: 'name,username,profile_picture_url', access_token: TOKEN },
+      timeout: 10000
+    })
+    res.json({
+      provider: 'owner',
+      username: data.username,
+      name: data.name || data.username,
+      avatar: data.profile_picture_url || null,
+      ig_account_id: IG_ACCOUNT_ID,
+    })
+  } catch (err) {
+    const igErr = err.response?.data?.error
+    res.status(502).json({ error: igErr?.message || err.message })
+  }
+})
+
+// POST /api/auth/instagram — Meta OAuth code exchange (Tech Provider flow).
+// Requires META_APP_ID + META_APP_SECRET env vars. Body: { code, redirect_uri }
+const META_APP_ID = process.env.META_APP_ID
+const META_APP_SECRET = process.env.META_APP_SECRET
+
+app.post('/api/auth/instagram', async (req, res) => {
+  if (!META_APP_ID || !META_APP_SECRET) {
+    return res.status(501).json({ error: 'OAuth not configured — set META_APP_ID and META_APP_SECRET' })
+  }
+  const { code, redirect_uri } = req.body || {}
+  if (!code || !redirect_uri) {
+    return res.status(400).json({ error: 'code and redirect_uri are required' })
+  }
+  try {
+    // 1. Exchange code for a short-lived user token
+    const { data: tokenData } = await axios.get(`${IG_BASE}/oauth/access_token`, {
+      params: { client_id: META_APP_ID, client_secret: META_APP_SECRET, redirect_uri, code },
+      timeout: 15000
+    })
+
+    // 2. Upgrade to a long-lived token (~60 days)
+    const { data: longLived } = await axios.get(`${IG_BASE}/oauth/access_token`, {
+      params: {
+        grant_type: 'fb_exchange_token',
+        client_id: META_APP_ID,
+        client_secret: META_APP_SECRET,
+        fb_exchange_token: tokenData.access_token,
+      },
+      timeout: 15000
+    })
+    const userToken = longLived.access_token
+
+    // 3. Find the user's page and its linked Instagram business account
+    const { data: pages } = await axios.get(`${IG_BASE}/me/accounts`, {
+      params: { fields: 'id,name,access_token,instagram_business_account{id,username,profile_picture_url}', access_token: userToken },
+      timeout: 15000
+    })
+    const page = (pages.data || []).find(p => p.instagram_business_account)
+    if (!page) {
+      return res.status(422).json({ error: 'No Instagram business account linked to your Facebook pages' })
+    }
+    const ig = page.instagram_business_account
+
+    // 4. Persist the connected account so webhooks/automation can use it
+    if (SUPABASE_READY) {
+      const cfg = await loadConfig()
+      cfg.connected_account = {
+        ig_account_id: ig.id,
+        username: ig.username,
+        page_id: page.id,
+        page_token: page.access_token,
+        user_token: userToken,
+        connected_at: new Date().toISOString(),
+      }
+      await saveConfig(cfg)
+    }
+
+    res.json({
+      provider: 'instagram',
+      username: ig.username,
+      avatar: ig.profile_picture_url || null,
+      ig_account_id: ig.id,
+      connected_at: new Date().toISOString(),
+    })
+  } catch (err) {
+    const igErr = err.response?.data?.error
+    console.error('[AUTH] OAuth exchange failed:', igErr?.message || err.message)
+    res.status(502).json({ error: igErr?.message || err.message })
+  }
+})
+
 export { app }
 
 if (!process.env.NETLIFY) {
