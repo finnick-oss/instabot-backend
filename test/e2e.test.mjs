@@ -430,6 +430,14 @@ test('webhook status endpoint reports whether the Page is subscribed', async () 
   assert.deepEqual(r.json.webhook, { subscribed: true, fields: ['feed'] })
 })
 
+test('resubscribe reports the Graph error for every field it tried', async () => {
+  const b = await connectViaOAuth()
+  route('POST', '/PAGE_B/subscribed_apps', ({ params }) => fail(`no permission for ${params.subscribed_fields}`))
+  const r = await http('POST', '/api/account/subscribe', { token: b })
+  assert.equal(r.status, 502)
+  assert.equal(r.json.error, 'feed: no permission for feed | messages: no permission for messages')
+})
+
 function signedRequest(payload, secret = 'test_app_secret') {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
   const sig = crypto.createHmac('sha256', secret).update(body).digest('base64url')

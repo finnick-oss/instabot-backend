@@ -246,16 +246,16 @@ async function getMediaTimestamp(account, mediaId) {
 
 // The app must be installed on the Page for Meta to deliver that Instagram account's webhooks
 async function subscribePage(pageId, pageToken) {
-  let lastError
+  const errors = []
   for (const fields of ['feed', 'messages']) {
     try {
       await axios.post(`${IG_BASE}/${pageId}/subscribed_apps`, null, {
         params: { subscribed_fields: fields, access_token: pageToken }, timeout: 10000
       })
       return { ok: true, fields }
-    } catch (e) { lastError = graphError(e) }
+    } catch (e) { errors.push(`${fields}: ${graphError(e)}`) }
   }
-  return { ok: false, error: lastError }
+  return { ok: false, error: errors.join(' | ') }
 }
 
 async function getPageSubscription(account) {
