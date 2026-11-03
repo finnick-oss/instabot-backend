@@ -134,11 +134,13 @@ async function sendDM(recipientId, text) {
   return res.data
 }
 
-// Send DM via private_reply (comment-to-DM — works without prior conversation)
+// Send DM via private reply (comment-to-DM — works without prior conversation)
+// Instagram private replies go through the Page's /messages endpoint with recipient.comment_id
 async function sendPrivateReply(commentId, text) {
-  const res = await axios.post(`${IG_BASE}/${commentId}/private_replies`, null, {
-    params: { message: text, access_token: TOKEN }
-  })
+  const res = await axios.post(`${IG_BASE}/${FB_PAGE_ID}/messages`, {
+    recipient: { comment_id: commentId },
+    message: { text }
+  }, { params: { access_token: TOKEN } })
   return res.data
 }
 
@@ -339,7 +341,7 @@ async function handleComment(commentId, postId, commentText, commenterId, commen
     }
   }
 
-  logInteraction(log)
+  await logInteraction(log)
 }
 
 // Handle postback (user clicked "I Followed" or similar)
@@ -358,7 +360,7 @@ async function handlePostback(senderId, payload) {
     const btnLabel = automation.admin_value_button_label || 'Get Your Link'
     try {
       await sendDMWithButton(senderId, linkMsg, btnLabel, valueUrl)
-      logInteraction({ commenter_id: senderId, name, value_sent: true, follow_status: 'following', source: 'postback' })
+      await logInteraction({ commenter_id: senderId, name, value_sent: true, follow_status: 'following', source: 'postback' })
       console.log(`[POSTBACK] Delivered value after follow confirmation`)
     } catch (e) {
       try { await sendDM(senderId, `${linkMsg}\n\n${valueUrl}`) } catch {}
@@ -387,15 +389,15 @@ app.get('/webhook', (req, res) => {
 
 // POST /webhook — incoming events from Meta
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200) // always respond 200 immediately
-
   const body = req.body
   console.log(`[WEBHOOK POST] object=${body?.object} | entry count=${body?.entry?.length}`)
   if (body.object !== 'instagram') {
     console.log(`[WEBHOOK SKIP] object is "${body?.object}" not "instagram"`)
-    return
+    return res.sendStatus(200)
   }
 
+  // Serverless functions freeze once the response is sent, so finish processing before replying
+  const tasks = []
   for (const entry of body.entry || []) {
     for (const change of entry.changes || []) {
       if (change.field === 'comments') {
@@ -406,8 +408,8 @@ app.post('/webhook', async (req, res) => {
         const commenterId = v.from?.id
         const commenterName = v.from?.name || v.from?.username
 
-        handleComment(commentId, postId, commentText, commenterId, commenterName)
-          .catch(e => console.error('[HANDLE COMMENT ERROR]', e.message))
+        tasks.push(handleComment(commentId, postId, commentText, commenterId, commenterName)
+          .catch(e => console.error('[HANDLE COMMENT ERROR]', e.message)))
       }
     }
 
@@ -415,15 +417,18 @@ app.post('/webhook', async (req, res) => {
     for (const msg of entry.messaging || []) {
       const senderId = msg.sender?.id
       if (msg.postback) {
-        handlePostback(senderId, msg.postback.payload)
-          .catch(e => console.error('[POSTBACK ERROR]', e.message))
+        tasks.push(handlePostback(senderId, msg.postback.payload)
+          .catch(e => console.error('[POSTBACK ERROR]', e.message)))
       }
       if (msg.message?.quick_reply) {
-        handlePostback(senderId, msg.message.quick_reply.payload)
-          .catch(e => console.error('[QUICK REPLY ERROR]', e.message))
+        tasks.push(handlePostback(senderId, msg.message.quick_reply.payload)
+          .catch(e => console.error('[QUICK REPLY ERROR]', e.message)))
       }
     }
   }
+
+  await Promise.all(tasks)
+  res.sendStatus(200)
 })
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
