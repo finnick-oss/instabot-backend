@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "dev:mock": "node test/mock-server.mjs",
+    "test": "node --test test/e2e.test.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.78.0",
