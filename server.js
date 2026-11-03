@@ -39,6 +39,7 @@ const PUBLIC_URL = (process.env.PUBLIC_URL || process.env.URL || `http://localho
 const OAUTH_REDIRECT_URI = `${PUBLIC_URL}/api/auth/callback`
 const FRONTEND_ORIGINS = [
   ...(process.env.FRONTEND_URL || '').split(',').map(s => s.trim()).filter(Boolean),
+  'https://flow-feed.vercel.app',
   'https://finnick-oss.github.io',
   'http://localhost:5173',
 ].map(u => { try { return new URL(u).origin } catch { return null } }).filter(Boolean)
