@@ -280,9 +280,8 @@ test('comment → public reply + private-reply DM with the link button, using th
   const dm = callsTo('POST', '/PAGE_B/messages')
   assert.equal(dm.length, 1)
   assert.deepEqual(dm[0].body.recipient, { comment_id: 'C1' })
-  const payload = dm[0].body.message.attachment.payload
-  assert.equal(payload.text, 'Hi fan!\n\nHere you go 🎁')
-  assert.deepEqual(payload.buttons, [{ type: 'web_url', url: 'https://example.com/guide.pdf', title: 'Get the PDF' }])
+  // Private replies show only text on Instagram, so the link goes in the message itself
+  assert.deepEqual(dm[0].body.message, { text: 'Hi fan!\n\nHere you go 🎁\n\nhttps://example.com/guide.pdf' })
   assert.equal(dm[0].params.access_token, 'PAGE_B_TOKEN')
 
   const log = (await http('GET', '/api/log', { token: b })).json
@@ -329,13 +328,15 @@ test('comments on the owner account still work with the env token', async () => 
 
 test('falls back to a plain-text DM with the link when the button template is rejected', async () => {
   const b = await connectViaOAuth()
-  await http('PUT', '/api/automations/a1', { token: b, body: valueAutomation() })
-  route('POST', '/PAGE_B/messages', ({ body }) => body.message.attachment ? fail('template not allowed') : { message_id: 'M2' })
+  await http('PUT', '/api/automations/a1', { token: b, body: valueAutomation({ dm_sequence: { opening_enabled: false, follow_gate_enabled: true, link_message: 'Here you go 🎁' } }) })
   await http('POST', '/webhook', { body: commentEvent('IG_B') })
+  route('POST', '/PAGE_B/messages', ({ body }) => body.message.attachment ? fail('template not allowed') : { message_id: 'M2' })
+  route('GET', '/USER_X', () => ({ is_user_follow_business: true }))
+  await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, message: { mid: 'm', text: 'done' } }) })
   const dms = callsTo('POST', '/PAGE_B/messages')
-  assert.equal(dms.length, 2)
-  assert.equal(dms[1].body.message.text, 'Hi fan!\n\nHere you go 🎁\n\nhttps://example.com/guide.pdf')
-  assert.equal(fake.rows('interactions')[0].data.dm_format, 'text')
+  assert.equal(dms.length, 3)
+  assert.equal(dms[2].body.message.text, 'Here you go 🎁\n\nhttps://example.com/guide.pdf')
+  assert.equal(fake.rows('interactions')[0].data.value_sent, true)
 })
 
 test('a failed DM is recorded with the Graph error', async () => {
@@ -349,16 +350,14 @@ test('a failed DM is recorded with the Graph error', async () => {
   assert.ok(data.comment_replied)
 })
 
-test('follow gate: private reply with follow buttons, then link only after the follow is confirmed', async () => {
+test('follow gate: private reply with the follow link, then link only after the follow is confirmed', async () => {
   const b = await connectViaOAuth()
   await http('PUT', '/api/automations/a1', { token: b, body: valueAutomation({ dm_sequence: { opening_enabled: true, opening_message: 'Hi {name}!', follow_gate_enabled: true, follow_gate_message: 'Follow first 👇', link_message: 'Unlocked 🎁' } }) })
 
   await http('POST', '/webhook', { body: commentEvent('IG_B') })
   const gate = callsTo('POST', '/PAGE_B/messages')[0]
   assert.deepEqual(gate.body.recipient, { comment_id: 'C1' })
-  assert.equal(gate.body.message.attachment.payload.text, 'Hi fan!\n\nFollow first 👇')
-  assert.deepEqual(gate.body.message.attachment.payload.buttons.map(x => x.type), ['web_url', 'postback'])
-  assert.equal(gate.body.message.attachment.payload.buttons[0].url, 'https://www.instagram.com/creator_b/')
+  assert.deepEqual(gate.body.message, { text: 'Hi fan!\n\nFollow first 👇\n\nFollow https://www.instagram.com/creator_b/ then reply "done" here 👇' })
 
   // Not following yet → nudge, no link
   route('GET', '/USER_X', () => ({ is_user_follow_business: false }))

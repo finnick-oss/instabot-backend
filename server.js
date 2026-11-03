@@ -365,29 +365,32 @@ async function handleComment(account, v) {
 
   // 2. Private reply DM. Instagram allows one private reply per comment until the user answers,
   //    so the opening message, follow gate and value link are combined into that single message.
+  //    Instagram accepts button templates as private replies but shows only their text, so the
+  //    links go in the text itself; buttons are used once the user has replied.
   const seq = automation.dm_sequence || {}
   const valueEnabled = automation.admin_value_enabled !== false && !!automation.admin_value
   const followGate = !!seq.follow_gate_enabled && valueEnabled
   const opening = seq.opening_enabled !== false
     ? fillTemplate(seq.opening_message || 'Hey {name}! Thanks for your comment 🙌', name)
     : ''
-  const recipient = { comment_id: commentId }
 
-  let result = null
+  let text = ''
   if (followGate) {
     const gate = fillTemplate(seq.follow_gate_message || 'Follow us first to get your exclusive link 👇', name)
-    const text = [opening, gate].filter(Boolean).join('\n\n')
-    const fallback = `${text}\n\nFollow https://www.instagram.com/${account.username}/ then reply "done" here 👇`
-    result = await sendWithButtons(account, recipient, text, followGateButtons(account), fallback)
-    if (result.ok) { log.follow_gate_sent = true; log.follow_gate_pending = true }
+    text = [opening, gate, `Follow https://www.instagram.com/${account.username}/ then reply "done" here 👇`].filter(Boolean).join('\n\n')
   } else if (valueEnabled) {
-    const text = [opening, valueMessage(automation, name)].filter(Boolean).join('\n\n')
-    result = await sendWithButtons(account, recipient, text, valueButtons(automation), `${text}\n\n${automation.admin_value}`)
-    if (result.ok) { log.value_sent = true; log.value_url = automation.admin_value }
-  } else if (opening) {
+    text = [opening, valueMessage(automation, name), automation.admin_value].filter(Boolean).join('\n\n')
+  } else {
+    text = opening
+  }
+
+  let result = null
+  if (text) {
     try {
-      await sendMessage(account, recipient, { text: opening })
+      await sendMessage(account, { comment_id: commentId }, { text })
       result = { ok: true, format: 'text' }
+      if (followGate) { log.follow_gate_sent = true; log.follow_gate_pending = true }
+      else if (valueEnabled) { log.value_sent = true; log.value_url = automation.admin_value }
     } catch (e) { result = { ok: false, error: graphError(e) } }
   }
 
