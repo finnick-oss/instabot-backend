@@ -265,7 +265,7 @@ test('legacy automation migrates once and is not recreated after deletion', asyn
   assert.equal((await http('GET', '/api/automations', { token: owner })).json.length, 0)
 })
 
-test('comment → public reply + private-reply DM with the link button, using that account\'s token', async () => {
+test('comment → public reply + opening DM with a "Send me the link" button; the tap sends the link', async () => {
   const b = await connectViaOAuth()
   await http('PUT', '/api/automations/a1', { token: b, body: valueAutomation() })
 
@@ -280,15 +280,25 @@ test('comment → public reply + private-reply DM with the link button, using th
   const dm = callsTo('POST', '/PAGE_B/messages')
   assert.equal(dm.length, 1)
   assert.deepEqual(dm[0].body.recipient, { comment_id: 'C1' })
-  // Private replies show only text on Instagram, so the link goes in the message itself
-  assert.deepEqual(dm[0].body.message, { text: 'Hi fan!\n\nHere you go 🎁\n\nhttps://example.com/guide.pdf' })
+  const opening = dm[0].body.message.attachment.payload
+  assert.equal(opening.text, 'Hi fan!')
+  assert.deepEqual(opening.buttons, [{ type: 'postback', title: 'Send me the link 👉', payload: 'SEND_LINK' }])
   assert.equal(dm[0].params.access_token, 'PAGE_B_TOKEN')
+  assert.equal(fake.rows('interactions')[0].data.awaiting_start, true)
+
+  // Tapping the button opens the messaging window → the link arrives as its own message
+  await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, postback: { payload: 'SEND_LINK' } }) })
+  const link = callsTo('POST', '/PAGE_B/messages')[1]
+  assert.deepEqual(link.body.recipient, { id: 'USER_X' })
+  assert.equal(link.body.message.attachment.payload.text, 'Here you go 🎁')
+  assert.deepEqual(link.body.message.attachment.payload.buttons, [{ type: 'web_url', url: 'https://example.com/guide.pdf', title: 'Get the PDF' }])
 
   const log = (await http('GET', '/api/log', { token: b })).json
   assert.equal(log.length, 1)
   assert.equal(log[0].comment_id, 'C1')
   assert.equal(log[0].dm_sent, true)
   assert.equal(log[0].value_sent, true)
+  assert.equal(log[0].awaiting_start, false)
   const stats = (await http('GET', '/api/stats', { token: b })).json
   assert.equal(stats.comments_replied, 1)
   assert.equal(stats.dms_sent, 1)
@@ -326,17 +336,18 @@ test('comments on the owner account still work with the env token', async () => 
   assert.deepEqual(callsTo('POST', '/PAGE_OWNER/messages')[0].body.recipient, { comment_id: 'C9' })
 })
 
-test('falls back to a plain-text DM with the link when the button template is rejected', async () => {
+test('falls back to one plain-text DM with the link when the button template is rejected', async () => {
   const b = await connectViaOAuth()
-  await http('PUT', '/api/automations/a1', { token: b, body: valueAutomation({ dm_sequence: { opening_enabled: false, follow_gate_enabled: true, link_message: 'Here you go 🎁' } }) })
-  await http('POST', '/webhook', { body: commentEvent('IG_B') })
+  await http('PUT', '/api/automations/a1', { token: b, body: valueAutomation() })
   route('POST', '/PAGE_B/messages', ({ body }) => body.message.attachment ? fail('template not allowed') : { message_id: 'M2' })
-  route('GET', '/USER_X', () => ({ is_user_follow_business: true }))
-  await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, message: { mid: 'm', text: 'done' } }) })
+  await http('POST', '/webhook', { body: commentEvent('IG_B') })
   const dms = callsTo('POST', '/PAGE_B/messages')
-  assert.equal(dms.length, 3)
-  assert.equal(dms[2].body.message.text, 'Here you go 🎁\n\nhttps://example.com/guide.pdf')
-  assert.equal(fake.rows('interactions')[0].data.value_sent, true)
+  assert.equal(dms.length, 2)
+  assert.equal(dms[1].body.message.text, 'Hi fan!\n\nHere you go 🎁\n\nhttps://example.com/guide.pdf')
+  const data = fake.rows('interactions')[0].data
+  assert.equal(data.dm_format, 'text')
+  assert.equal(data.value_sent, true)
+  assert.equal(data.awaiting_start, undefined)
 })
 
 test('a failed DM is recorded with the Graph error', async () => {
@@ -350,34 +361,43 @@ test('a failed DM is recorded with the Graph error', async () => {
   assert.ok(data.comment_replied)
 })
 
-test('follow gate: private reply with the follow link, then link only after the follow is confirmed', async () => {
+test('follow gate: opening DM, then follow buttons, then the link only after the follow is confirmed', async () => {
   const b = await connectViaOAuth()
   await http('PUT', '/api/automations/a1', { token: b, body: valueAutomation({ dm_sequence: { opening_enabled: true, opening_message: 'Hi {name}!', follow_gate_enabled: true, follow_gate_message: 'Follow first 👇', link_message: 'Unlocked 🎁' } }) })
 
   await http('POST', '/webhook', { body: commentEvent('IG_B') })
-  const gate = callsTo('POST', '/PAGE_B/messages')[0]
-  assert.deepEqual(gate.body.recipient, { comment_id: 'C1' })
-  assert.deepEqual(gate.body.message, { text: 'Hi fan!\n\nFollow first 👇\n\nFollow https://www.instagram.com/creator_b/ then reply "done" here 👇' })
+  const opening = callsTo('POST', '/PAGE_B/messages')[0]
+  assert.deepEqual(opening.body.recipient, { comment_id: 'C1' })
+  assert.equal(opening.body.message.attachment.payload.text, 'Hi fan!')
+  assert.equal(opening.body.message.attachment.payload.buttons[0].payload, 'SEND_LINK')
+
+  // A typed reply works like the button → follow gate with Follow / I followed buttons
+  await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, message: { mid: 'm0', text: 'link please' } }) })
+  const gate = callsTo('POST', '/PAGE_B/messages')[1]
+  assert.deepEqual(gate.body.recipient, { id: 'USER_X' })
+  assert.equal(gate.body.message.attachment.payload.text, 'Follow first 👇')
+  assert.deepEqual(gate.body.message.attachment.payload.buttons.map(x => x.type), ['web_url', 'postback'])
+  assert.equal(gate.body.message.attachment.payload.buttons[0].url, 'https://www.instagram.com/creator_b/')
 
   // Not following yet → nudge, no link
   route('GET', '/USER_X', () => ({ is_user_follow_business: false }))
   await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, postback: { payload: 'USER_FOLLOWED' } }) })
   let dms = callsTo('POST', '/PAGE_B/messages')
-  assert.equal(dms.length, 2)
-  assert.match(dms[1].body.message.attachment.payload.text, /couldn't see your follow/)
-  assert.deepEqual(dms[1].body.recipient, { id: 'USER_X' })
+  assert.equal(dms.length, 3)
+  assert.match(dms[2].body.message.attachment.payload.text, /couldn't see your follow/)
+  assert.deepEqual(dms[2].body.recipient, { id: 'USER_X' })
 
   // Echoes of our own messages are ignored
   await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'IG_B' }, recipient: { id: 'USER_X' }, message: { text: 'x', is_echo: true } }) })
-  assert.equal(callsTo('POST', '/PAGE_B/messages').length, 2)
+  assert.equal(callsTo('POST', '/PAGE_B/messages').length, 3)
 
   // Following now (user just replies "done") → link delivered
   route('GET', '/USER_X', () => ({ is_user_follow_business: true }))
   await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, message: { mid: 'm', text: 'done' } }) })
   dms = callsTo('POST', '/PAGE_B/messages')
-  assert.equal(dms.length, 3)
-  assert.equal(dms[2].body.message.attachment.payload.text, 'Unlocked 🎁')
-  assert.equal(dms[2].body.message.attachment.payload.buttons[0].url, 'https://example.com/guide.pdf')
+  assert.equal(dms.length, 4)
+  assert.equal(dms[3].body.message.attachment.payload.text, 'Unlocked 🎁')
+  assert.equal(dms[3].body.message.attachment.payload.buttons[0].url, 'https://example.com/guide.pdf')
 
   const data = fake.rows('interactions')[0].data
   assert.equal(data.follow_gate_pending, false)
@@ -386,7 +406,7 @@ test('follow gate: private reply with the follow link, then link only after the 
 
   // Further messages from the user don't resend the link
   await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, message: { mid: 'm2', text: 'thanks!' } }) })
-  assert.equal(callsTo('POST', '/PAGE_B/messages').length, 3)
+  assert.equal(callsTo('POST', '/PAGE_B/messages').length, 4)
 })
 
 test('DMs from people without a pending follow gate are left alone', async () => {

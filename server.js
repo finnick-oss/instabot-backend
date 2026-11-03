@@ -313,6 +313,38 @@ function followGateButtons(account) {
   ]
 }
 
+const START_PAYLOAD = 'SEND_LINK'
+const startButtons = () => [{ type: 'postback', title: 'Send me the link 👉', payload: START_PAYLOAD }]
+
+function followGateText(automation, name) {
+  return fillTemplate(automation.dm_sequence?.follow_gate_message || 'Follow us first to get your exclusive link 👇', name)
+}
+
+function followGateFallback(text, account) {
+  return `${text}\n\nFollow https://www.instagram.com/${account.username}/ then reply "done" here 👇`
+}
+
+function dmFlow(automation) {
+  const seq = automation.dm_sequence || {}
+  const valueEnabled = automation.admin_value_enabled !== false && !!automation.admin_value
+  return { seq, valueEnabled, followGate: !!seq.follow_gate_enabled && valueEnabled }
+}
+
+// The step after the opening message: the follow gate, or the link straight away
+async function sendNextStep(account, recipient, automation, name, data) {
+  const { followGate } = dmFlow(automation)
+  if (followGate) {
+    const text = followGateText(automation, name)
+    const result = await sendWithButtons(account, recipient, text, followGateButtons(account), followGateFallback(text, account))
+    if (result.ok) { data.follow_gate_sent = true; data.follow_gate_pending = true }
+    return result
+  }
+  const text = valueMessage(automation, name)
+  const result = await sendWithButtons(account, recipient, text, valueButtons(automation), `${text}\n\n${automation.admin_value}`)
+  if (result.ok) { data.value_sent = true; data.value_url = automation.admin_value }
+  return result
+}
+
 // Core automation: handle a new comment for a connected account
 async function handleComment(account, v) {
   const igId = account.ig_account_id
@@ -364,33 +396,29 @@ async function handleComment(account, v) {
   }
 
   // 2. Private reply DM. Instagram allows one private reply per comment until the user answers,
-  //    so the opening message, follow gate and value link are combined into that single message.
-  //    Instagram accepts button templates as private replies but shows only their text, so the
-  //    links go in the text itself; buttons are used once the user has replied.
-  const seq = automation.dm_sequence || {}
-  const valueEnabled = automation.admin_value_enabled !== false && !!automation.admin_value
-  const followGate = !!seq.follow_gate_enabled && valueEnabled
+  //    so it is the opening message with a "Send me the link" button. Tapping it opens the
+  //    messaging window, and the follow gate / link follow as separate messages (handleMessage).
+  //    If Instagram rejects the button, everything goes in one text message instead.
+  const { seq, valueEnabled, followGate } = dmFlow(automation)
   const opening = seq.opening_enabled !== false
     ? fillTemplate(seq.opening_message || 'Hey {name}! Thanks for your comment 🙌', name)
     : ''
-
-  let text = ''
-  if (followGate) {
-    const gate = fillTemplate(seq.follow_gate_message || 'Follow us first to get your exclusive link 👇', name)
-    text = [opening, gate, `Follow https://www.instagram.com/${account.username}/ then reply "done" here 👇`].filter(Boolean).join('\n\n')
-  } else if (valueEnabled) {
-    text = [opening, valueMessage(automation, name), automation.admin_value].filter(Boolean).join('\n\n')
-  } else {
-    text = opening
-  }
+  const recipient = { comment_id: commentId }
 
   let result = null
-  if (text) {
+  if (followGate || valueEnabled) {
+    const greeting = opening || fillTemplate('Hey {name}! Thanks for your comment 🙌', name)
+    const rest = followGate
+      ? followGateFallback(followGateText(automation, name), account)
+      : `${valueMessage(automation, name)}\n\n${automation.admin_value}`
+    result = await sendWithButtons(account, recipient, greeting, startButtons(), [opening, rest].filter(Boolean).join('\n\n'))
+    if (result.ok && result.format === 'buttons') log.awaiting_start = true
+    else if (result.ok && followGate) { log.follow_gate_sent = true; log.follow_gate_pending = true }
+    else if (result.ok) { log.value_sent = true; log.value_url = automation.admin_value }
+  } else if (opening) {
     try {
-      await sendMessage(account, { comment_id: commentId }, { text })
+      await sendMessage(account, recipient, { text: opening })
       result = { ok: true, format: 'text' }
-      if (followGate) { log.follow_gate_sent = true; log.follow_gate_pending = true }
-      else if (valueEnabled) { log.value_sent = true; log.value_url = automation.admin_value }
     } catch (e) { result = { ok: false, error: graphError(e) } }
   }
 
@@ -403,7 +431,7 @@ async function handleComment(account, v) {
   await updateInteraction(claim.data.id, log)
 }
 
-// Handle DM events: "I followed" postbacks / quick replies, or any text reply to a follow gate
+// Handle DM events: "Send me the link" / "I followed" taps, or any text reply that stands in for them
 async function handleMessage(account, msg) {
   if (msg.message?.is_echo) { console.log('[DM IN] echo of our own message'); return }
   const senderId = msg.sender?.id
@@ -412,24 +440,37 @@ async function handleMessage(account, msg) {
   const payload = msg.postback?.payload || msg.message?.quick_reply?.payload
   console.log(`[DM IN] @${account.username} from ${senderId}: ${payload ? `payload ${payload}` : JSON.stringify(msg.message?.text ?? Object.keys(msg))}`)
   if (!payload && !msg.message?.text) return
-  if (payload && payload !== 'USER_FOLLOWED') return
+  if (payload && payload !== 'USER_FOLLOWED' && payload !== START_PAYLOAD) return
 
-  // Only act when this user has a pending follow gate from one of our automations
+  // Only act when this user is part-way through a flow from one of our automations
   const rows = must(await db().from('interactions').select('*')
     .eq('ig_account_id', account.ig_account_id).eq('commenter_id', senderId)
     .order('created_at', { ascending: false }).limit(5))
-  const pending = rows.find(r => r.data?.follow_gate_pending)
-  if (!pending) { console.log(`[DM SKIP] No pending follow gate for ${senderId} (${rows.length} interactions)`); return }
+  const pending = rows.find(r => r.data?.awaiting_start || r.data?.follow_gate_pending)
+  if (!pending) { console.log(`[DM SKIP] No pending flow for ${senderId} (${rows.length} interactions)`); return }
 
   const automationRow = must(await db().from('automations').select('*').eq('id', pending.automation_id).maybeSingle())
   if (!automationRow) return
   const automation = automationFromRow(automationRow)
   const name = pending.data?.name
+  const recipient = { id: senderId }
+  const data = { ...pending.data }
+
+  if (data.awaiting_start) {
+    const result = await sendNextStep(account, recipient, automation, name, data)
+    if (result.ok) {
+      data.awaiting_start = false
+      console.log(`[FLOW] next step sent to ${senderId}`)
+    } else {
+      data.flow_error = result.error
+      console.error('[FLOW ERROR]', result.error)
+    }
+    await updateInteraction(pending.id, data)
+    return
+  }
 
   const following = await checkFollowStatus(account, senderId)
   console.log(`[FOLLOW GATE] ${senderId} following=${following}`)
-  const recipient = { id: senderId }
-  const data = { ...pending.data }
 
   if (following === false) {
     await sendWithButtons(account, recipient,
