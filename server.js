@@ -568,6 +568,39 @@ app.get('/api/auth/login', async (req, res) => {
 })
 
 // GET /api/auth/callback — Meta redirects here with ?code&state
+const PAGE_FIELDS = 'id,name,access_token,instagram_business_account{id,username,name,profile_picture_url}'
+const LOGIN_PERMISSIONS = ['pages_show_list', 'pages_read_engagement', 'pages_manage_metadata', 'instagram_basic', 'instagram_manage_comments', 'instagram_manage_messages']
+
+async function getBusinessPages(userToken) {
+  try {
+    const { data } = await axios.get(`${IG_BASE}/me/businesses`, {
+      params: { fields: `owned_pages.limit(100){${PAGE_FIELDS}},client_pages.limit(100){${PAGE_FIELDS}}`, limit: 50, access_token: userToken },
+      timeout: 15000
+    })
+    const seen = new Map()
+    for (const b of data.data || []) {
+      for (const p of [...(b.owned_pages?.data || []), ...(b.client_pages?.data || [])]) seen.set(p.id, p)
+    }
+    return [...seen.values()]
+  } catch (e) {
+    console.warn('[AUTH] /me/businesses lookup failed:', graphError(e))
+    return []
+  }
+}
+
+// Explain why no account was found: missing permissions, no Page chosen, or Pages without Instagram
+async function describeMissingPages(userToken, pages) {
+  let granted = null
+  try {
+    const { data } = await axios.get(`${IG_BASE}/me/permissions`, { params: { access_token: userToken }, timeout: 10000 })
+    granted = (data.data || []).filter(p => p.status === 'granted').map(p => p.permission)
+  } catch (e) { console.warn('[AUTH] /me/permissions failed:', graphError(e)) }
+  const missing = granted ? LOGIN_PERMISSIONS.filter(p => !granted.includes(p)) : []
+  if (missing.length) return `Facebook didn't grant these permissions: ${missing.join(', ')}. Add them to the app's Facebook Login for Business configuration and approve them when connecting.`
+  if (pages.length === 0) return 'Facebook returned no Pages. When connecting, select the Facebook Page linked to your Instagram professional account.'
+  return `No Instagram professional account is linked to the Facebook Pages you selected (${pages.map(p => p.name).join(', ')}). Link your Instagram account to one of them in Meta Business Suite, then connect again.`
+}
+
 app.get('/api/auth/callback', async (req, res) => {
   const { code, state, error_description: deniedReason } = req.query
   const stateRow = state
@@ -600,12 +633,17 @@ app.get('/api/auth/callback', async (req, res) => {
 
     // 2. Find every Page the user granted that has an Instagram professional account linked
     const { data: pages } = await axios.get(`${IG_BASE}/me/accounts`, {
-      params: { fields: 'id,name,access_token,instagram_business_account{id,username,name,profile_picture_url}', limit: 100, access_token: userToken },
+      params: { fields: PAGE_FIELDS, limit: 100, access_token: userToken },
       timeout: 15000
     })
-    const linked = (pages.data || []).filter(p => p.instagram_business_account && p.access_token)
+    const isLinked = p => p.instagram_business_account && p.access_token
+    let linked = (pages.data || []).filter(isLinked)
+    // Pages owned by a Business portfolio don't always show up in /me/accounts
+    if (linked.length === 0) linked = (await getBusinessPages(userToken)).filter(isLinked)
     if (linked.length === 0) {
-      return back(`auth_error=${encodeURIComponent('No Instagram professional account is linked to the Facebook Pages you selected')}`)
+      const message = await describeMissingPages(userToken, pages.data || [])
+      console.warn('[AUTH] no linked Instagram account:', message)
+      return back(`auth_error=${encodeURIComponent(message)}`)
     }
 
     // 3. Store each account (page tokens from a long-lived user token don't expire) and install the app on its Page

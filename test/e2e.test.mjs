@@ -197,6 +197,42 @@ test('OAuth with no Instagram-linked page returns an error to the frontend', asy
   assert.match(cb.location, /^http:\/\/localhost:5173\/#auth_error=/)
 })
 
+async function callbackWith(setup) {
+  route('GET', '/oauth/access_token', () => ({ access_token: 'T' }))
+  route('GET', '/me', () => ({ id: 'FB_U' }))
+  setup()
+  const login = await http('GET', `/api/auth/login?return_to=${encodeURIComponent('http://localhost:5173/')}`)
+  const state = new URL(login.location).searchParams.get('state')
+  return http('GET', `/api/auth/callback?code=c&state=${state}`)
+}
+
+test('OAuth error names the permissions Facebook did not grant', async () => {
+  const cb = await callbackWith(() => {
+    route('GET', '/me/accounts', () => ({ data: [] }))
+    route('GET', '/me/businesses', () => ({ data: [] }))
+    route('GET', '/me/permissions', () => ({ data: [
+      { permission: 'pages_show_list', status: 'granted' },
+      { permission: 'instagram_basic', status: 'declined' },
+    ] }))
+  })
+  const msg = decodeURIComponent(cb.location.split('#auth_error=')[1])
+  assert.match(msg, /instagram_basic/)
+  assert.doesNotMatch(msg, /pages_show_list/)
+})
+
+test('OAuth finds Instagram accounts on Business-portfolio Pages', async () => {
+  const cb = await callbackWith(() => {
+    route('GET', '/me/accounts', () => ({ data: [] }))
+    route('GET', '/me/businesses', () => ({ data: [{ id: 'BIZ', owned_pages: { data: [
+      { id: 'PAGE_BIZ', name: 'Biz Page', access_token: 'BIZ_TOKEN', instagram_business_account: { id: 'IG_BIZ', username: 'biz_creator' } },
+    ] } }] }))
+    route('POST', '/PAGE_BIZ/subscribed_apps', () => ({ success: true }))
+  })
+  assert.match(cb.location, /#session=/)
+  const acct = fake.rows('accounts').find(a => a.ig_account_id === 'IG_BIZ')
+  assert.equal(acct.page_token, 'BIZ_TOKEN')
+})
+
 test('each account only sees and edits its own automations', async () => {
   const b = await connectViaOAuth()
   const owner = await ownerSession()
