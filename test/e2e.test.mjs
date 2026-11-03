@@ -281,7 +281,7 @@ test('comment → public reply + opening DM with a "Send me the link" button; th
   assert.equal(dm.length, 1)
   assert.deepEqual(dm[0].body.recipient, { comment_id: 'C1' })
   const opening = dm[0].body.message.attachment.payload
-  assert.equal(opening.text, 'Hi fan!')
+  assert.equal(opening.text, 'Hi fan!\n\nTap the button below or reply "link" 👇')
   assert.deepEqual(opening.buttons, [{ type: 'postback', title: 'Send me the link 👉', payload: 'SEND_LINK' }])
   assert.equal(dm[0].params.access_token, 'PAGE_B_TOKEN')
   assert.equal(fake.rows('interactions')[0].data.awaiting_start, true)
@@ -290,7 +290,8 @@ test('comment → public reply + opening DM with a "Send me the link" button; th
   await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, postback: { payload: 'SEND_LINK' } }) })
   const link = callsTo('POST', '/PAGE_B/messages')[1]
   assert.deepEqual(link.body.recipient, { id: 'USER_X' })
-  assert.equal(link.body.message.attachment.payload.text, 'Here you go 🎁')
+  // Desktop web shows no buttons, so the link is in the text too
+  assert.equal(link.body.message.attachment.payload.text, 'Here you go 🎁\n\nhttps://example.com/guide.pdf')
   assert.deepEqual(link.body.message.attachment.payload.buttons, [{ type: 'web_url', url: 'https://example.com/guide.pdf', title: 'Get the PDF' }])
 
   const log = (await http('GET', '/api/log', { token: b })).json
@@ -368,14 +369,14 @@ test('follow gate: opening DM, then follow buttons, then the link only after the
   await http('POST', '/webhook', { body: commentEvent('IG_B') })
   const opening = callsTo('POST', '/PAGE_B/messages')[0]
   assert.deepEqual(opening.body.recipient, { comment_id: 'C1' })
-  assert.equal(opening.body.message.attachment.payload.text, 'Hi fan!')
+  assert.equal(opening.body.message.attachment.payload.text, 'Hi fan!\n\nTap the button below or reply "link" 👇')
   assert.equal(opening.body.message.attachment.payload.buttons[0].payload, 'SEND_LINK')
 
   // A typed reply works like the button → follow gate with Follow / I followed buttons
   await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, message: { mid: 'm0', text: 'link please' } }) })
   const gate = callsTo('POST', '/PAGE_B/messages')[1]
   assert.deepEqual(gate.body.recipient, { id: 'USER_X' })
-  assert.equal(gate.body.message.attachment.payload.text, 'Follow first 👇')
+  assert.equal(gate.body.message.attachment.payload.text, 'Follow first 👇\n\nFollow https://www.instagram.com/creator_b/ then reply "done" here 👇')
   assert.deepEqual(gate.body.message.attachment.payload.buttons.map(x => x.type), ['web_url', 'postback'])
   assert.equal(gate.body.message.attachment.payload.buttons[0].url, 'https://www.instagram.com/creator_b/')
 
@@ -396,7 +397,7 @@ test('follow gate: opening DM, then follow buttons, then the link only after the
   await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, message: { mid: 'm', text: 'done' } }) })
   dms = callsTo('POST', '/PAGE_B/messages')
   assert.equal(dms.length, 4)
-  assert.equal(dms[3].body.message.attachment.payload.text, 'Unlocked 🎁')
+  assert.equal(dms[3].body.message.attachment.payload.text, 'Unlocked 🎁\n\nhttps://example.com/guide.pdf')
   assert.equal(dms[3].body.message.attachment.payload.buttons[0].url, 'https://example.com/guide.pdf')
 
   const data = fake.rows('interactions')[0].data
