@@ -11,8 +11,8 @@ Today (Standard access) the comment reply and the first DM work for everyone, bu
 
 | Field | Current | Set to |
 |---|---|---|
-| Privacy policy URL | `https://eyexvisioncare.com/privacy-and-refund-policy/` (unrelated page) | `https://flow-feed.vercel.app/#privacy` |
-| Site URL (Website platform) | `http://localhost:5173/` | `https://flow-feed.vercel.app/` |
+| Privacy policy URL | `https://eyexvisioncare.com/privacy-and-refund-policy/` (unrelated page) | `https://finnick-oss.github.io/instabot/#privacy` |
+| Site URL (Website platform) | `http://localhost:5173/` | `https://finnick-oss.github.io/instabot/` |
 | User data deletion | `https://autoreplyagent.netlify.app/api/meta/data-deletion` | keep |
 | App icon | — | 1024×1024 InstaBot logo |
 | Category | Utility and productivity | keep |
@@ -57,11 +57,11 @@ Request **Advanced access** for each, in **Review → App Review → Permissions
 
 ## 3. Instructions for the reviewer (paste into "Testing instructions")
 
-> InstaBot is a web app at https://flow-feed.vercel.app/ .
+> InstaBot is a web app at https://finnick-oss.github.io/instabot/ .
 >
 > **Requirements:** a Facebook account that manages a Facebook Page linked to an Instagram professional (Business or Creator) account with at least one post, plus a second Instagram account to comment from. If you prefer, use our test account: [ADD TEST ACCOUNT CREDENTIALS HERE — do not reuse a personal password].
 >
-> 1. Open https://flow-feed.vercel.app/ and click **Connect Instagram**.
+> 1. Open https://finnick-oss.github.io/instabot/ and click **Connect Instagram**.
 > 2. Log in with Facebook, select the Page linked to your Instagram professional account, and grant the requested permissions.
 > 3. You are returned to the InstaBot dashboard showing the connected Instagram account. (instagram_basic, pages_show_list, pages_read_engagement, business_management)
 > 4. Click **New Automation**. Choose one of your posts, enter the keyword `link`, set the link message and a URL (e.g. https://example.com), optionally enable **Follow to unlock**, then click **Save & Activate**. The dashboard confirms the webhook subscription is active. (pages_manage_metadata)
