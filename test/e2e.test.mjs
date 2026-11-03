@@ -415,7 +415,12 @@ test('button taps delivered as standby events still move the flow on', async () 
   await http('PUT', '/api/automations/a1', { token: b, body: valueAutomation() })
   await http('POST', '/webhook', { body: commentEvent('IG_B') })
   const tap = { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, postback: { payload: 'SEND_LINK' } }
+  route('POST', '/PAGE_B/take_thread_control', () => ({ success: true }))
   await http('POST', '/webhook', { body: { object: 'instagram', entry: [{ id: 'IG_B', time: 0, standby: [tap] }] } })
+  // The app claims the conversation before replying, since another inbox owned it
+  const control = callsTo('POST', '/PAGE_B/take_thread_control')
+  assert.equal(control.length, 1)
+  assert.deepEqual(control[0].body.recipient, { id: 'USER_X' })
   const dms = callsTo('POST', '/PAGE_B/messages')
   assert.equal(dms.length, 2)
   assert.deepEqual(dms[1].body.recipient, { id: 'USER_X' })

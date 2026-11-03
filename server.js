@@ -198,6 +198,18 @@ async function sendMessage(account, recipient, message) {
   return res.data
 }
 
+// Ask Meta to hand this conversation to our app; needed when another app or the Inbox owns it
+async function takeThreadControl(account, igsid) {
+  try {
+    await axios.post(`${IG_BASE}/${account.page_id}/take_thread_control`, { recipient: { id: igsid }, metadata: 'instabot flow' }, {
+      params: { access_token: account.page_token }, timeout: 10000
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: graphError(e) }
+  }
+}
+
 function buttonTemplate(text, buttons) {
   return { attachment: { type: 'template', payload: { template_type: 'button', text: text.slice(0, 640), buttons } } }
 }
@@ -434,7 +446,7 @@ async function handleComment(account, v) {
 }
 
 // Handle DM events: "Send me the link" / "I followed" taps, or any text reply that stands in for them
-async function handleMessage(account, msg) {
+async function handleMessage(account, msg, { standby = false } = {}) {
   if (msg.message?.is_echo) { console.log('[DM IN] echo of our own message'); return }
   const senderId = msg.sender?.id
   if (!senderId || senderId === account.ig_account_id) return
@@ -457,6 +469,12 @@ async function handleMessage(account, msg) {
   const name = pending.data?.name
   const recipient = { id: senderId }
   const data = { ...pending.data }
+
+  // Only claim the conversation for people part-way through one of our flows
+  if (standby) {
+    const control = await takeThreadControl(account, senderId)
+    console.log(`[FLOW] take_thread_control for ${senderId}: ${control.ok ? 'ok' : control.error}`)
+  }
 
   if (data.awaiting_start) {
     const result = await sendNextStep(account, recipient, automation, name, data)
@@ -553,7 +571,7 @@ app.post('/webhook', async (req, res) => {
       // When another app or the Inbox owns the conversation, Meta delivers messages as standby
       for (const msg of entry.standby || []) {
         console.log('[WEBHOOK] standby event')
-        await handleMessage(account, msg)
+        await handleMessage(account, msg, { standby: true })
       }
       if (!entry.changes?.length && !entry.messaging?.length && !entry.standby?.length) {
         console.log(`[WEBHOOK] unhandled entry: ${JSON.stringify(entry).slice(0, 500)}`)
