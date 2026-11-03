@@ -410,6 +410,18 @@ test('follow gate: opening DM, then follow buttons, then the link only after the
   assert.equal(callsTo('POST', '/PAGE_B/messages').length, 4)
 })
 
+test('button taps delivered as standby events still move the flow on', async () => {
+  const b = await connectViaOAuth()
+  await http('PUT', '/api/automations/a1', { token: b, body: valueAutomation() })
+  await http('POST', '/webhook', { body: commentEvent('IG_B') })
+  const tap = { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, postback: { payload: 'SEND_LINK' } }
+  await http('POST', '/webhook', { body: { object: 'instagram', entry: [{ id: 'IG_B', time: 0, standby: [tap] }] } })
+  const dms = callsTo('POST', '/PAGE_B/messages')
+  assert.equal(dms.length, 2)
+  assert.deepEqual(dms[1].body.recipient, { id: 'USER_X' })
+  assert.equal(fake.rows('interactions')[0].data.value_sent, true)
+})
+
 test('DMs from people without a pending follow gate are left alone', async () => {
   await connectViaOAuth()
   await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'RANDOM' }, recipient: { id: 'IG_B' }, message: { mid: 'm', text: 'hello' } }) })

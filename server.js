@@ -547,8 +547,17 @@ app.post('/webhook', async (req, res) => {
       }
       for (const change of entry.changes || []) {
         if (change.field === 'comments') await handleComment(account, change.value || {})
+        else console.log(`[WEBHOOK] unhandled change field=${change.field}: ${JSON.stringify(change.value).slice(0, 300)}`)
       }
       for (const msg of entry.messaging || []) await handleMessage(account, msg)
+      // When another app or the Inbox owns the conversation, Meta delivers messages as standby
+      for (const msg of entry.standby || []) {
+        console.log('[WEBHOOK] standby event')
+        await handleMessage(account, msg)
+      }
+      if (!entry.changes?.length && !entry.messaging?.length && !entry.standby?.length) {
+        console.log(`[WEBHOOK] unhandled entry: ${JSON.stringify(entry).slice(0, 500)}`)
+      }
     })().catch(e => console.error('[WEBHOOK ERROR]', e.message)))
   }
 
