@@ -405,11 +405,12 @@ async function handleComment(account, v) {
 
 // Handle DM events: "I followed" postbacks / quick replies, or any text reply to a follow gate
 async function handleMessage(account, msg) {
-  if (msg.message?.is_echo) return
+  if (msg.message?.is_echo) { console.log('[DM IN] echo of our own message'); return }
   const senderId = msg.sender?.id
   if (!senderId || senderId === account.ig_account_id) return
 
   const payload = msg.postback?.payload || msg.message?.quick_reply?.payload
+  console.log(`[DM IN] @${account.username} from ${senderId}: ${payload ? `payload ${payload}` : JSON.stringify(msg.message?.text ?? Object.keys(msg))}`)
   if (!payload && !msg.message?.text) return
   if (payload && payload !== 'USER_FOLLOWED') return
 
@@ -418,7 +419,7 @@ async function handleMessage(account, msg) {
     .eq('ig_account_id', account.ig_account_id).eq('commenter_id', senderId)
     .order('created_at', { ascending: false }).limit(5))
   const pending = rows.find(r => r.data?.follow_gate_pending)
-  if (!pending) return
+  if (!pending) { console.log(`[DM SKIP] No pending follow gate for ${senderId} (${rows.length} interactions)`); return }
 
   const automationRow = must(await db().from('automations').select('*').eq('id', pending.automation_id).maybeSingle())
   if (!automationRow) return
@@ -426,6 +427,7 @@ async function handleMessage(account, msg) {
   const name = pending.data?.name
 
   const following = await checkFollowStatus(account, senderId)
+  console.log(`[FOLLOW GATE] ${senderId} following=${following}`)
   const recipient = { id: senderId }
   const data = { ...pending.data }
 
@@ -450,6 +452,7 @@ async function handleMessage(account, msg) {
     console.log(`[FOLLOW GATE] value delivered to ${senderId}`)
   } else {
     data.value_error = result.error
+    console.error('[FOLLOW GATE ERROR]', result.error)
   }
   await updateInteraction(pending.id, data)
 }
