@@ -200,26 +200,15 @@ async function doSeedOwnerAccount() {
 
 // ─── INSTAGRAM / GRAPH API ────────────────────────────────────────────────────
 
-// graph.instagram.com token endpoints are documented as GET, but some apps get
-// "Unsupported request - method type: get" and must POST the same fields as a form
-async function igTokenRequest(path, params) {
-  try {
-    return (await axios.get(`${IG_LOGIN_HOST}/${path}`, { params, timeout: 15000 })).data
-  } catch (e) {
-    if (!/method type: get/i.test(graphError(e))) throw e
-    return (await axios.post(`${IG_LOGIN_HOST}/${path}`, new URLSearchParams(params).toString(), {
-      headers: { 'content-type': 'application/x-www-form-urlencoded' }, timeout: 15000
-    })).data
-  }
-}
-
 // Refresh an Instagram Login token that is close to expiring, so automations keep running
 // even when the creator doesn't open the dashboard. Facebook Page tokens don't expire.
 async function withFreshToken(account) {
   if (!isInstagramLogin(account) || !account.token_expires_at) return account
   if (new Date(account.token_expires_at).getTime() - Date.now() > IG_TOKEN_REFRESH_MS) return account
   try {
-    const data = await igTokenRequest('refresh_access_token', { grant_type: 'ig_refresh_token', access_token: account.page_token })
+    const { data } = await axios.get(`${IG_LOGIN_HOST}/refresh_access_token`, {
+      params: { grant_type: 'ig_refresh_token', access_token: account.page_token }, timeout: 10000
+    })
     const update = {
       page_token: data.access_token,
       token_expires_at: new Date(Date.now() + (data.expires_in || 0) * 1000).toISOString(),
@@ -893,8 +882,9 @@ app.get('/api/auth/instagram/callback', async (req, res) => {
     if (missing.length) return back(`auth_error=${encodeURIComponent(`Instagram didn't grant these permissions: ${missing.join(', ')}. Allow all of them when connecting.`)}`)
 
     step = 'long-lived token exchange'
-    const longLived = await igTokenRequest('access_token', {
-      grant_type: 'ig_exchange_token', client_secret: INSTAGRAM_APP_SECRET, access_token: shortLived.access_token
+    const { data: longLived } = await axios.get(`${IG_LOGIN_HOST}/access_token`, {
+      params: { grant_type: 'ig_exchange_token', client_secret: INSTAGRAM_APP_SECRET, access_token: shortLived.access_token },
+      timeout: 15000
     })
 
     // 2. user_id is the professional account ID that webhooks use (id is app-scoped)
@@ -924,7 +914,12 @@ app.get('/api/auth/instagram/callback', async (req, res) => {
     back(`session=${await createSession(igId)}`)
   } catch (e) {
     console.error(`[AUTH] Instagram OAuth failed at ${step}:`, graphError(e))
-    back(`auth_error=${encodeURIComponent(graphError(e))}`)
+    // Until the instagram_business_* permissions have Advanced access, Meta refuses the
+    // long-lived token for accounts without a role on the app, with this unhelpful message
+    const message = step === 'long-lived token exchange' && /unsupported request/i.test(graphError(e))
+      ? 'Instagram refused to connect this account. While InstaBot is awaiting Meta approval, only Instagram accounts added as testers on the app can log in with Instagram.'
+      : graphError(e)
+    back(`auth_error=${encodeURIComponent(message)}`)
   }
 })
 
