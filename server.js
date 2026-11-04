@@ -397,7 +397,7 @@ function followGateButtons(account) {
 }
 
 const START_PAYLOAD = 'SEND_LINK'
-const startButtons = () => [{ type: 'postback', title: 'Send me the link 👉', payload: START_PAYLOAD }]
+const startButtons = () => [{ type: 'postback', title: 'Send me the link', payload: START_PAYLOAD }]
 
 function followGateText(automation, name) {
   return fillTemplate(automation.dm_sequence?.follow_gate_message || 'Follow us first to get your exclusive link 👇', name)
@@ -413,21 +413,20 @@ function dmFlow(automation) {
   return { seq, valueEnabled, followGate: !!seq.follow_gate_enabled && valueEnabled }
 }
 
-// Instagram on desktop web shows a button message's text but not its buttons, so every
-// message also carries its link or a "reply" instruction in the text.
+// Button messages keep their text short and leave the link to the button. The plain-text
+// fallback, sent only when Instagram rejects the buttons, carries the link instead.
 const valueText = (automation, name) => `${valueMessage(automation, name)}\n\n${automation.admin_value}`
 
 // The step after the opening message: the follow gate, or the link straight away
 async function sendNextStep(account, recipient, automation, name, data) {
   const { followGate } = dmFlow(automation)
   if (followGate) {
-    const text = followGateFallback(followGateText(automation, name), account)
-    const result = await sendWithButtons(account, recipient, text, followGateButtons(account), text)
+    const text = followGateText(automation, name)
+    const result = await sendWithButtons(account, recipient, text, followGateButtons(account), followGateFallback(text, account))
     if (result.ok) { data.follow_gate_sent = true; data.follow_gate_pending = true }
     return result
   }
-  const text = valueText(automation, name)
-  const result = await sendWithButtons(account, recipient, text, valueButtons(automation), text)
+  const result = await sendWithButtons(account, recipient, valueMessage(automation, name), valueButtons(automation), valueText(automation, name))
   if (result.ok) { data.value_sent = true; data.value_url = automation.admin_value }
   return result
 }
@@ -494,7 +493,7 @@ async function handleComment(account, v) {
 
   let result = null
   if (followGate || valueEnabled) {
-    const greeting = `${opening || fillTemplate('Hey {name}! Thanks for your comment 🙌', name)}\n\nTap the button below or reply "link" 👇`
+    const greeting = opening || fillTemplate('Hey {name}! Thanks for your comment 🙌', name)
     const rest = followGate ? followGateFallback(followGateText(automation, name), account) : valueText(automation, name)
     result = await sendWithButtons(account, recipient, greeting, startButtons(), [opening, rest].filter(Boolean).join('\n\n'))
     if (result.ok && result.format === 'buttons') log.awaiting_start = true
@@ -564,16 +563,16 @@ async function handleMessage(account, msg, { standby = false } = {}) {
   console.log(`[FOLLOW GATE] ${senderId} following=${following}`)
 
   if (following === false) {
-    const nudge = `Hmm, we couldn't see your follow yet 👀 Follow https://www.instagram.com/${account.username}/ and tap "I followed" or reply "done" again!`
-    await sendWithButtons(account, recipient, nudge, followGateButtons(account), nudge)
+    const nudge = `Hmm, we couldn't see your follow yet 👀 Follow us, then tap "I followed" again!`
+    const nudgeFallback = `Hmm, we couldn't see your follow yet 👀 Follow https://www.instagram.com/${account.username}/ and reply "done" again!`
+    await sendWithButtons(account, recipient, nudge, followGateButtons(account), nudgeFallback)
     data.follow_status = 'not_following'
     await updateInteraction(pending.id, data)
     return
   }
 
   // following === null means Instagram didn't return the field; deliver rather than block the user
-  const text = valueText(automation, name)
-  const result = await sendWithButtons(account, recipient, text, valueButtons(automation), text)
+  const result = await sendWithButtons(account, recipient, valueMessage(automation, name), valueButtons(automation), valueText(automation, name))
   data.follow_status = following ? 'following' : 'unverified'
   if (result.ok) {
     data.follow_gate_pending = false
