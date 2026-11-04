@@ -523,6 +523,15 @@ async function handleComment(account, v) {
   await updateInteraction(claim.data.id, log)
 }
 
+async function resendValue(account, row, senderId) {
+  const automationRow = must(await db().from('automations').select('*').eq('id', row.automation_id).maybeSingle())
+  const automation = automationRow && automationFromRow(automationRow)
+  if (!automation || !dmFlow(automation).valueEnabled) { console.log(`[DM SKIP] Flow finished for ${senderId} and its automation has no link`); return }
+  const name = row.data?.name
+  const result = await sendWithButtons(account, { id: senderId }, valueMessage(automation, name), valueButtons(automation), valueText(automation, name))
+  console.log(`[FLOW] link re-sent to ${senderId}: ${result.ok ? 'ok' : result.error}`)
+}
+
 // Handle DM events: "Send me the link" / "I followed" taps, or any text reply that stands in for them
 async function handleMessage(account, msg, { standby = false } = {}) {
   if (msg.message?.is_echo) { console.log('[DM IN] echo of our own message'); return }
@@ -539,7 +548,13 @@ async function handleMessage(account, msg, { standby = false } = {}) {
     .eq('ig_account_id', account.ig_account_id).eq('commenter_id', senderId)
     .order('created_at', { ascending: false }).limit(5))
   const pending = rows.find(r => r.data?.awaiting_start || r.data?.follow_gate_pending)
-  if (!pending) { console.log(`[DM SKIP] No pending flow for ${senderId} (${rows.length} interactions)`); return }
+  if (!pending) {
+    // A tap on an old button after the flow finished: send the link again
+    const done = payload && rows.find(r => r.data?.value_sent)
+    if (done) return resendValue(account, done, senderId)
+    console.log(`[DM SKIP] No pending flow for ${senderId} (${rows.length} interactions)`)
+    return
+  }
 
   const automationRow = must(await db().from('automations').select('*').eq('id', pending.automation_id).maybeSingle())
   if (!automationRow) return

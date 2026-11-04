@@ -302,6 +302,15 @@ test('comment → public reply + opening DM with a "Send me the link" button; th
   assert.equal(link.body.message.attachment.payload.text, 'Here you go 🎁', 'the link lives on the button only')
   assert.deepEqual(link.body.message.attachment.payload.buttons, [{ type: 'web_url', url: 'https://example.com/guide.pdf', title: 'Get the PDF' }])
 
+  // Tapping the old button again after the flow finished sends the link again
+  await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, postback: { payload: 'SEND_LINK' } }) })
+  const again = callsTo('POST', '/PAGE_B/messages')[2]
+  assert.deepEqual(again.body.recipient, { id: 'USER_X' })
+  assert.equal(again.body.message.attachment.payload.buttons[0].url, 'https://example.com/guide.pdf')
+  // Plain chat messages after the flow finished are left alone
+  await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, message: { mid: 'm9', text: 'thanks!' } }) })
+  assert.equal(callsTo('POST', '/PAGE_B/messages').length, 3)
+
   const log = (await http('GET', '/api/log', { token: b })).json
   assert.equal(log.length, 1)
   assert.equal(log[0].comment_id, 'C1')
