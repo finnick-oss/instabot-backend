@@ -15,10 +15,14 @@ process.env.META_APP_ID = 'APP_1'
 process.env.META_APP_SECRET = 'test_app_secret'
 process.env.PUBLIC_URL = 'https://api.example.test'
 process.env.FRONTEND_URL = 'https://app.example.test'
+process.env.INSTAGRAM_APP_ID = 'IG_APP_1'
+process.env.INSTAGRAM_APP_SECRET = 'test_ig_secret'
 
 const { app, __setSupabaseForTests } = await import('../server.js')
 
 const GRAPH = 'https://graph.facebook.com/v25.0'
+// graph.instagram.com (Instagram Login) calls are routed as 'ig:<path>'
+const IG_GRAPH = 'https://graph.instagram.com/v25.0'
 
 // ─── Graph API mock ───────────────────────────────────────────────────────────
 let calls = []
@@ -26,9 +30,14 @@ let routes = {}
 function route(method, path, handler) { routes[`${method} ${path}`] = handler }
 
 axios.defaults.adapter = async (config) => {
-  const url = config.url.startsWith(GRAPH) ? config.url.slice(GRAPH.length) : config.url
+  const url = config.url.startsWith(GRAPH) ? config.url.slice(GRAPH.length)
+    : config.url.startsWith(IG_GRAPH) ? 'ig:' + config.url.slice(IG_GRAPH.length)
+    : config.url
   const method = config.method.toUpperCase()
-  const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+  let body = config.data
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body) } catch { body = Object.fromEntries(new URLSearchParams(body)) }
+  }
   const call = { method, path: url, params: config.params || {}, body }
   calls.push(call)
   const handler = routes[`${method} ${url}`]
@@ -534,4 +543,127 @@ test('X-Hub-Signature-256 is checked against the app secret', async () => {
     assert.equal((await post('sha256=' + '0'.repeat(64))).status, 401)
     assert.equal((await post(null)).status, 401)
   } finally { strict.close() }
+})
+
+// ─── Instagram Login ──────────────────────────────────────────────────────────
+
+// Connect a creator through Business Login for Instagram and return their session token
+async function connectViaInstagram({ igId = '17841400000000001', username = 'ig_only', permissions = 'instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments', expiresIn = 5184000 } = {}) {
+  route('POST', 'https://api.instagram.com/oauth/access_token', ({ body }) =>
+    body.code === 'IG_CODE' && body.client_id === 'IG_APP_1' && body.client_secret === 'test_ig_secret' &&
+    body.grant_type === 'authorization_code' && body.redirect_uri === 'https://api.example.test/api/auth/instagram/callback'
+      ? { data: [{ access_token: 'IG_SHORT', user_id: 'APP_SCOPED_ID', permissions }] } : fail('bad code exchange'))
+  route('GET', 'https://graph.instagram.com/access_token', ({ params }) =>
+    params.grant_type === 'ig_exchange_token' && params.access_token === 'IG_SHORT' && params.client_secret === 'test_ig_secret'
+      ? { access_token: 'IG_LONG', token_type: 'bearer', expires_in: expiresIn } : fail('bad exchange'))
+  route('GET', 'ig:/me', ({ params }) => params.access_token === 'IG_LONG'
+    ? { id: 'APP_SCOPED_ID', user_id: igId, username, name: 'IG Only', profile_picture_url: 'https://img/ig.jpg', account_type: 'BUSINESS' }
+    : fail('bad token'))
+  route('POST', 'ig:/me/subscribed_apps', () => ({ success: true }))
+
+  const login = await http('GET', `/api/auth/instagram/login?return_to=${encodeURIComponent('https://app.example.test/')}`)
+  assert.equal(login.status, 302)
+  const dialog = new URL(login.location)
+  assert.equal(dialog.origin + dialog.pathname, 'https://www.instagram.com/oauth/authorize')
+  assert.equal(dialog.searchParams.get('client_id'), 'IG_APP_1')
+  assert.equal(dialog.searchParams.get('redirect_uri'), 'https://api.example.test/api/auth/instagram/callback')
+  assert.equal(dialog.searchParams.get('scope'), 'instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments')
+
+  const cb = await http('GET', `/api/auth/instagram/callback?code=IG_CODE&state=${dialog.searchParams.get('state')}`)
+  assert.equal(cb.status, 302)
+  return cb.location
+}
+
+const sessionFrom = (location) => {
+  const m = location.match(/^https:\/\/app\.example\.test\/#session=(.+)$/)
+  assert.ok(m, `unexpected callback redirect: ${location}`)
+  return m[1]
+}
+
+test('Instagram Login connects an account without a Facebook Page and subscribes it to webhooks', async () => {
+  const token = sessionFrom(await connectViaInstagram())
+  const me = (await http('GET', '/api/me', { token })).json
+  assert.equal(me.username, 'ig_only')
+  assert.equal(me.login_type, 'instagram')
+
+  const acct = fake.rows('accounts').find(a => a.ig_account_id === '17841400000000001')
+  assert.equal(acct.page_token, 'IG_LONG', 'stores the long-lived token, not the short one')
+  assert.equal(acct.page_id, '17841400000000001')
+  assert.equal(acct.login_type, 'instagram')
+  assert.ok(new Date(acct.token_expires_at).getTime() > Date.now() + 50 * 86400000)
+  const sub = callsTo('POST', 'ig:/me/subscribed_apps')[0]
+  assert.equal(sub.params.access_token, 'IG_LONG')
+  assert.match(sub.params.subscribed_fields, /comments/)
+  assert.match(sub.params.subscribed_fields, /messages/)
+})
+
+test('Instagram Login names the permissions that were not granted', async () => {
+  const location = await connectViaInstagram({ permissions: 'instagram_business_basic' })
+  const msg = decodeURIComponent(location.split('#auth_error=')[1])
+  assert.match(msg, /instagram_business_manage_messages/)
+  assert.match(msg, /instagram_business_manage_comments/)
+  assert.equal(fake.rows('accounts').some(a => a.login_type === 'instagram'), false)
+})
+
+test('Instagram Login callback rejects a forged state', async () => {
+  assert.equal((await http('GET', '/api/auth/instagram/callback?code=IG_CODE&state=forged')).status, 400)
+})
+
+test('Instagram Login accounts reply and DM through graph.instagram.com with their own token', async () => {
+  const igId = '17841400000000001'
+  const token = sessionFrom(await connectViaInstagram({ igId }))
+  await http('PUT', '/api/automations/ig1', { token, body: valueAutomation() })
+  route('POST', 'ig:/C1/replies', () => ({ id: 'R' }))
+  route('POST', `ig:/${igId}/messages`, () => ({ message_id: 'M' }))
+
+  await http('POST', '/webhook', { body: commentEvent(igId) })
+  const reply = callsTo('POST', 'ig:/C1/replies')[0]
+  assert.equal(reply.params.access_token, 'IG_LONG')
+  const dm = callsTo('POST', `ig:/${igId}/messages`)[0]
+  assert.deepEqual(dm.body.recipient, { comment_id: 'C1' })
+  assert.equal(dm.params.access_token, 'IG_LONG')
+  assert.equal(calls.some(c => c.path === '/C1/replies' || c.path.endsWith('/messages') && !c.path.startsWith('ig:')), false, 'nothing goes to graph.facebook.com')
+
+  // Tapping the button sends the link through the same host
+  await http('POST', '/webhook', { body: messagingEvent(igId, { sender: { id: 'USER_X' }, postback: { payload: 'SEND_LINK' } }) })
+  const link = callsTo('POST', `ig:/${igId}/messages`)[1]
+  assert.deepEqual(link.body.recipient, { id: 'USER_X' })
+  assert.match(JSON.stringify(link.body.message), /guide\.pdf/)
+})
+
+test('Instagram tokens close to expiry are refreshed before use', async () => {
+  const igId = '17841400000000001'
+  const token = sessionFrom(await connectViaInstagram({ igId, expiresIn: 3 * 86400 }))
+  route('GET', 'https://graph.instagram.com/refresh_access_token', ({ params }) =>
+    params.grant_type === 'ig_refresh_token' && params.access_token === 'IG_LONG' ? { access_token: 'IG_REFRESHED', expires_in: 5184000 } : fail('bad refresh'))
+  route('GET', `ig:/${igId}/media`, ({ params }) => ({ data: [], token: params.access_token }))
+
+  await http('GET', '/api/posts', { token })
+  assert.equal(callsTo('GET', `ig:/${igId}/media`)[0].params.access_token, 'IG_REFRESHED')
+  const acct = fake.rows('accounts').find(a => a.ig_account_id === igId)
+  assert.equal(acct.page_token, 'IG_REFRESHED')
+  assert.ok(new Date(acct.token_expires_at).getTime() > Date.now() + 50 * 86400000)
+})
+
+test('Instagram data-deletion callback removes the Instagram Login account', async () => {
+  const igId = '17841400000000001'
+  const token = sessionFrom(await connectViaInstagram({ igId }))
+  const payload = Buffer.from(JSON.stringify({ user_id: igId, algorithm: 'HMAC-SHA256' })).toString('base64url')
+  const sig = (secret) => crypto.createHmac('sha256', secret).update(payload).digest('base64url')
+  const post = (secret) => http('POST', '/api/meta/instagram/data-deletion', {
+    raw: `signed_request=${sig(secret)}.${payload}`, headers: { 'content-type': 'application/x-www-form-urlencoded' },
+  })
+
+  assert.equal((await post('test_app_secret')).status, 400, 'must be signed with the Instagram app secret')
+  const r = await post('test_ig_secret')
+  assert.equal(r.status, 200)
+  assert.ok(r.json.confirmation_code)
+  assert.equal((await http('GET', '/api/me', { token })).status, 401)
+})
+
+test('disconnecting an Instagram Login account unsubscribes the Instagram account', async () => {
+  const token = sessionFrom(await connectViaInstagram())
+  route('DELETE', 'ig:/me/subscribed_apps', () => ({ success: true }))
+  assert.equal((await http('DELETE', '/api/account', { token })).status, 200)
+  assert.equal(callsTo('DELETE', 'ig:/me/subscribed_apps')[0].params.access_token, 'IG_LONG')
 })

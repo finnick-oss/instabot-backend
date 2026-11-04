@@ -15,6 +15,10 @@ create table if not exists accounts (
   updated_at    timestamptz default now()
 );
 create index if not exists accounts_fb_user_idx on accounts (fb_user_id);
+-- 'facebook' accounts use a Page token; 'instagram' accounts (Instagram Login) store their
+-- Instagram token in page_token, their Instagram ID in page_id, and refresh it before it expires
+alter table accounts add column if not exists login_type text not null default 'facebook';
+alter table accounts add column if not exists token_expires_at timestamptz;
 
 -- Dashboard login sessions (only the sha256 of the token is stored)
 create table if not exists sessions (

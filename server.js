@@ -34,9 +34,19 @@ const META_APP_SECRET = process.env.META_APP_SECRET
 const INSTAGRAM_APP_SECRET = process.env.INSTAGRAM_APP_SECRET
 const META_LOGIN_CONFIG_ID = process.env.META_LOGIN_CONFIG_ID || '1528229642012084'
 
+// Instagram API with Instagram Login: people sign in with Instagram, no Facebook Page needed.
+// It uses the Instagram app ID/secret from "API setup with Instagram login", not the Meta app's.
+const INSTAGRAM_APP_ID = process.env.INSTAGRAM_APP_ID
+const IG_LOGIN_HOST = 'https://graph.instagram.com'
+const IG_LOGIN_BASE = `${IG_LOGIN_HOST}/${GRAPH_VERSION}`
+const IG_LOGIN_SCOPES = ['instagram_business_basic', 'instagram_business_manage_messages', 'instagram_business_manage_comments']
+// Long-lived Instagram tokens last 60 days; refresh them once they are this close to expiring
+const IG_TOKEN_REFRESH_MS = 10 * 24 * 60 * 60 * 1000
+
 // Netlify sets URL to the site's primary URL
 const PUBLIC_URL = (process.env.PUBLIC_URL || process.env.URL || `http://localhost:${process.env.PORT || 3001}`).replace(/\/$/, '')
 const OAUTH_REDIRECT_URI = `${PUBLIC_URL}/api/auth/callback`
+const IG_OAUTH_REDIRECT_URI = `${PUBLIC_URL}/api/auth/instagram/callback`
 const FRONTEND_ORIGINS = [
   ...(process.env.FRONTEND_URL || '').split(',').map(s => s.trim()).filter(Boolean),
   'https://flow-feed.vercel.app',
@@ -76,7 +86,8 @@ app.use((req, res, next) => {
 
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex')
 const randomToken = () => crypto.randomBytes(32).toString('base64url')
-const graphError = (e) => e.response?.data?.error?.message || e.message
+// graph.* APIs return { error: { message } }; api.instagram.com returns { error_message }
+const graphError = (e) => e.response?.data?.error?.message || e.response?.data?.error_message || e.message
 
 function db() {
   if (!supabase) throw new Error('Supabase is not configured')
@@ -111,9 +122,15 @@ function publicAccount(account) {
     avatar: account.avatar || null,
     page_id: account.page_id,
     page_name: account.page_name || null,
+    login_type: account.login_type || 'facebook',
     connected_at: account.connected_at,
   }
 }
+
+// Instagram Login accounts call graph.instagram.com with their own Instagram token, stored in
+// page_token with page_id = the Instagram account ID. Facebook Login accounts go through their Page.
+const isInstagramLogin = (account) => account.login_type === 'instagram'
+const graphBase = (account) => isInstagramLogin(account) ? IG_LOGIN_BASE : IG_BASE
 
 function automationFromRow(row) {
   return { ...row.data, id: row.id, active: row.active }
@@ -183,9 +200,32 @@ async function doSeedOwnerAccount() {
 
 // ─── INSTAGRAM / GRAPH API ────────────────────────────────────────────────────
 
+// Refresh an Instagram Login token that is close to expiring, so automations keep running
+// even when the creator doesn't open the dashboard. Facebook Page tokens don't expire.
+async function withFreshToken(account) {
+  if (!isInstagramLogin(account) || !account.token_expires_at) return account
+  if (new Date(account.token_expires_at).getTime() - Date.now() > IG_TOKEN_REFRESH_MS) return account
+  try {
+    const { data } = await axios.get(`${IG_LOGIN_HOST}/refresh_access_token`, {
+      params: { grant_type: 'ig_refresh_token', access_token: account.page_token }, timeout: 10000
+    })
+    const update = {
+      page_token: data.access_token,
+      token_expires_at: new Date(Date.now() + (data.expires_in || 0) * 1000).toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+    must(await db().from('accounts').update(update).eq('ig_account_id', account.ig_account_id))
+    console.log(`[AUTH] refreshed Instagram token for @${account.username}`)
+    return { ...account, ...update }
+  } catch (e) {
+    console.warn(`[AUTH] Instagram token refresh failed for @${account.username}:`, graphError(e))
+    return account
+  }
+}
+
 // Post a public comment reply
 async function replyToComment(account, commentId, message) {
-  const res = await axios.post(`${IG_BASE}/${commentId}/replies`, null, {
+  const res = await axios.post(`${graphBase(account)}/${commentId}/replies`, null, {
     params: { message, access_token: account.page_token }, timeout: 10000
   })
   return res.data
@@ -193,7 +233,7 @@ async function replyToComment(account, commentId, message) {
 
 // Send a message. recipient is { comment_id } for a private reply or { id } inside the 24h window.
 async function sendMessage(account, recipient, message) {
-  const res = await axios.post(`${IG_BASE}/${account.page_id}/messages`, { recipient, message }, {
+  const res = await axios.post(`${graphBase(account)}/${account.page_id}/messages`, { recipient, message }, {
     params: { access_token: account.page_token }, timeout: 10000
   })
   return res.data
@@ -201,6 +241,8 @@ async function sendMessage(account, recipient, message) {
 
 // Ask Meta to hand this conversation to our app; needed when another app or the Inbox owns it
 async function takeThreadControl(account, igsid) {
+  // Handover is a Page (Messenger Platform) feature; Instagram Login accounts have no Page
+  if (isInstagramLogin(account)) return { ok: false, error: 'not available with Instagram Login' }
   try {
     await axios.post(`${IG_BASE}/${account.page_id}/take_thread_control`, { recipient: { id: igsid }, metadata: 'instabot flow' }, {
       params: { access_token: account.page_token }, timeout: 10000
@@ -234,7 +276,7 @@ async function sendWithButtons(account, recipient, text, buttons, fallbackText) 
 // Only available once the user has messaged the business (Instagram user profile API)
 async function checkFollowStatus(account, igsid) {
   try {
-    const { data } = await axios.get(`${IG_BASE}/${igsid}`, {
+    const { data } = await axios.get(`${graphBase(account)}/${igsid}`, {
       params: { fields: 'is_user_follow_business', access_token: account.page_token }, timeout: 8000
     })
     return typeof data.is_user_follow_business === 'boolean' ? data.is_user_follow_business : null
@@ -248,7 +290,7 @@ const mediaTimestampCache = new Map()
 async function getMediaTimestamp(account, mediaId) {
   if (mediaTimestampCache.has(mediaId)) return mediaTimestampCache.get(mediaId)
   try {
-    const { data } = await axios.get(`${IG_BASE}/${mediaId}`, {
+    const { data } = await axios.get(`${graphBase(account)}/${mediaId}`, {
       params: { fields: 'timestamp', access_token: account.page_token }, timeout: 8000
     })
     const ts = data.timestamp ? new Date(data.timestamp).getTime() : null
@@ -271,12 +313,40 @@ async function subscribePage(pageId, pageToken) {
   return { ok: false, error: errors.join(' | ') }
 }
 
+// Instagram Login accounts subscribe the Instagram account itself instead of a Page
+const IG_LOGIN_WEBHOOK_FIELDS = 'comments,messages,messaging_postbacks'
+
+async function subscribeInstagramAccount(token) {
+  try {
+    await axios.post(`${IG_LOGIN_BASE}/me/subscribed_apps`, null, {
+      params: { subscribed_fields: IG_LOGIN_WEBHOOK_FIELDS, access_token: token }, timeout: 10000
+    })
+    return { ok: true, fields: IG_LOGIN_WEBHOOK_FIELDS }
+  } catch (e) {
+    return { ok: false, error: graphError(e) }
+  }
+}
+
+function subscribeAccount(account) {
+  return isInstagramLogin(account)
+    ? subscribeInstagramAccount(account.page_token)
+    : subscribePage(account.page_id, account.page_token)
+}
+
+const subscriptionUrl = (account) => isInstagramLogin(account)
+  ? `${IG_LOGIN_BASE}/me/subscribed_apps`
+  : `${IG_BASE}/${account.page_id}/subscribed_apps`
+
+async function unsubscribeAccount(account) {
+  await axios.delete(subscriptionUrl(account), { params: { access_token: account.page_token }, timeout: 10000 })
+}
+
 async function getPageSubscription(account) {
   try {
-    const { data } = await axios.get(`${IG_BASE}/${account.page_id}/subscribed_apps`, {
-      params: { access_token: account.page_token }, timeout: 10000
-    })
-    const ours = (data.data || []).find(a => a.id === META_APP_ID)
+    const { data } = await axios.get(subscriptionUrl(account), { params: { access_token: account.page_token }, timeout: 10000 })
+    // An Instagram token only sees its own app's subscription; a Page lists every installed app
+    const apps = data.data || []
+    const ours = isInstagramLogin(account) ? apps[0] : apps.find(a => a.id === META_APP_ID)
     return { subscribed: !!ours, fields: ours?.subscribed_fields || [] }
   } catch (e) {
     return { subscribed: null, error: graphError(e) }
@@ -559,11 +629,12 @@ app.post('/webhook', async (req, res) => {
   const tasks = []
   for (const entry of body.entry || []) {
     tasks.push((async () => {
-      const account = await getAccount(String(entry.id))
-      if (!account) {
+      const stored = await getAccount(String(entry.id))
+      if (!stored) {
         console.log(`[WEBHOOK SKIP] No connected account for ${entry.id}`)
         return
       }
+      const account = await withFreshToken(stored)
       for (const change of entry.changes || []) {
         if (change.field === 'comments') await handleComment(account, change.value || {})
         else console.log(`[WEBHOOK] unhandled change field=${change.field}: ${JSON.stringify(change.value).slice(0, 300)}`)
@@ -609,7 +680,7 @@ async function requireAuth(req, res, next) {
   const account = await getAccount(session.ig_account_id)
   if (!account) return res.status(401).json({ error: 'Account disconnected' })
 
-  req.account = account
+  req.account = await withFreshToken(account)
   req.sessionHash = tokenHash
   next()
 }
@@ -621,15 +692,41 @@ function validReturnTo(returnTo) {
   } catch { return null }
 }
 
-// GET /api/auth/login?return_to=<frontend url> — start Facebook Login for Business
-app.get('/api/auth/login', async (req, res) => {
+// Validate return_to and store a single-use OAuth state; returns null after sending an error response
+async function beginLogin(req, res, missingConfig) {
   const returnTo = validReturnTo(req.query.return_to)
-  if (!returnTo) return res.status(400).json({ error: 'return_to must be one of the allowed frontend URLs', allowed: FRONTEND_ORIGINS })
-  if (!META_APP_SECRET) return res.redirect(`${returnTo}#auth_error=${encodeURIComponent('Login is not configured yet (META_APP_SECRET missing)')}`)
-
+  if (!returnTo) {
+    res.status(400).json({ error: 'return_to must be one of the allowed frontend URLs', allowed: FRONTEND_ORIGINS })
+    return null
+  }
+  if (missingConfig) {
+    res.redirect(`${returnTo}#auth_error=${encodeURIComponent(`Login is not configured yet (${missingConfig} missing)`)}`)
+    return null
+  }
   const state = randomToken()
   must(await db().from('oauth_states').delete().lt('created_at', new Date(Date.now() - OAUTH_STATE_TTL_MS).toISOString()))
   must(await db().from('oauth_states').insert({ state, return_to: returnTo }))
+  return state
+}
+
+// Consume the OAuth state from a callback; returns the frontend URL, or null after sending an error
+async function finishLogin(req, res) {
+  const { state } = req.query
+  const stateRow = state
+    ? must(await db().from('oauth_states').select('*').eq('state', state).maybeSingle())
+    : null
+  if (!stateRow || Date.now() - new Date(stateRow.created_at).getTime() > OAUTH_STATE_TTL_MS) {
+    res.status(400).send('Login link expired. Please go back and try connecting again.')
+    return null
+  }
+  must(await db().from('oauth_states').delete().eq('state', state))
+  return stateRow.return_to
+}
+
+// GET /api/auth/login?return_to=<frontend url> — start Facebook Login for Business
+app.get('/api/auth/login', async (req, res) => {
+  const state = await beginLogin(req, res, !META_APP_SECRET && 'META_APP_SECRET')
+  if (!state) return
 
   const params = new URLSearchParams({
     client_id: META_APP_ID,
@@ -677,15 +774,10 @@ async function describeMissingPages(userToken, pages) {
 }
 
 app.get('/api/auth/callback', async (req, res) => {
-  const { code, state, error_description: deniedReason } = req.query
-  const stateRow = state
-    ? must(await db().from('oauth_states').select('*').eq('state', state).maybeSingle())
-    : null
-  if (!stateRow || Date.now() - new Date(stateRow.created_at).getTime() > OAUTH_STATE_TTL_MS) {
-    return res.status(400).send('Login link expired. Please go back and try connecting again.')
-  }
-  must(await db().from('oauth_states').delete().eq('state', state))
-  const back = (fragment) => res.redirect(`${stateRow.return_to}#${fragment}`)
+  const { code, error_description: deniedReason } = req.query
+  const returnTo = await finishLogin(req, res)
+  if (!returnTo) return
+  const back = (fragment) => res.redirect(`${returnTo}#${fragment}`)
 
   if (!code) return back(`auth_error=${encodeURIComponent(deniedReason || 'Login was cancelled')}`)
 
@@ -733,6 +825,8 @@ app.get('/api/auth/callback', async (req, res) => {
         page_name: page.name,
         page_token: page.access_token,
         fb_user_id: me.id,
+        login_type: 'facebook',
+        token_expires_at: null,
         updated_at: new Date().toISOString(),
       }))
       const sub = await subscribePage(page.id, page.access_token)
@@ -743,6 +837,80 @@ app.get('/api/auth/callback', async (req, res) => {
     back(`session=${session}`)
   } catch (e) {
     console.error('[AUTH] OAuth failed:', graphError(e))
+    back(`auth_error=${encodeURIComponent(graphError(e))}`)
+  }
+})
+
+// GET /api/auth/instagram/login?return_to=<frontend url> — start Business Login for Instagram
+app.get('/api/auth/instagram/login', async (req, res) => {
+  const missing = !INSTAGRAM_APP_ID ? 'INSTAGRAM_APP_ID' : !INSTAGRAM_APP_SECRET ? 'INSTAGRAM_APP_SECRET' : null
+  const state = await beginLogin(req, res, missing)
+  if (!state) return
+
+  const params = new URLSearchParams({
+    client_id: INSTAGRAM_APP_ID,
+    redirect_uri: IG_OAUTH_REDIRECT_URI,
+    response_type: 'code',
+    scope: IG_LOGIN_SCOPES.join(','),
+    state,
+  })
+  res.redirect(`https://www.instagram.com/oauth/authorize?${params}`)
+})
+
+// GET /api/auth/instagram/callback — Instagram redirects here with ?code&state
+app.get('/api/auth/instagram/callback', async (req, res) => {
+  const { code, error_description: deniedReason } = req.query
+  const returnTo = await finishLogin(req, res)
+  if (!returnTo) return
+  const back = (fragment) => res.redirect(`${returnTo}#${fragment}`)
+
+  if (!code) return back(`auth_error=${encodeURIComponent(deniedReason || 'Login was cancelled')}`)
+
+  try {
+    // 1. Exchange the code for a short-lived token, then for a 60-day one
+    const { data: tokenData } = await axios.post('https://api.instagram.com/oauth/access_token', new URLSearchParams({
+      client_id: INSTAGRAM_APP_ID,
+      client_secret: INSTAGRAM_APP_SECRET,
+      grant_type: 'authorization_code',
+      redirect_uri: IG_OAUTH_REDIRECT_URI,
+      code,
+    }).toString(), { headers: { 'content-type': 'application/x-www-form-urlencoded' }, timeout: 15000 })
+    const shortLived = tokenData.data?.[0] || tokenData
+    const granted = typeof shortLived.permissions === 'string' ? shortLived.permissions.split(',') : shortLived.permissions
+    const missing = Array.isArray(granted) ? IG_LOGIN_SCOPES.filter(p => !granted.includes(p)) : []
+    if (missing.length) return back(`auth_error=${encodeURIComponent(`Instagram didn't grant these permissions: ${missing.join(', ')}. Allow all of them when connecting.`)}`)
+
+    const { data: longLived } = await axios.get(`${IG_LOGIN_HOST}/access_token`, {
+      params: { grant_type: 'ig_exchange_token', client_secret: INSTAGRAM_APP_SECRET, access_token: shortLived.access_token },
+      timeout: 15000
+    })
+
+    // 2. user_id is the professional account ID that webhooks use (id is app-scoped)
+    const { data: profile } = await axios.get(`${IG_LOGIN_BASE}/me`, {
+      params: { fields: 'user_id,username,name,profile_picture_url,account_type', access_token: longLived.access_token },
+      timeout: 10000
+    })
+    const igId = String(profile.user_id || shortLived.user_id)
+
+    must(await db().from('accounts').upsert({
+      ig_account_id: igId,
+      username: profile.username,
+      name: profile.name || profile.username,
+      avatar: profile.profile_picture_url || null,
+      page_id: igId,
+      page_name: null,
+      page_token: longLived.access_token,
+      fb_user_id: null,
+      login_type: 'instagram',
+      token_expires_at: new Date(Date.now() + (longLived.expires_in || 0) * 1000).toISOString(),
+      updated_at: new Date().toISOString(),
+    }))
+    const sub = await subscribeInstagramAccount(longLived.access_token)
+    console.log(`[AUTH] connected @${profile.username} with Instagram Login — webhook subscription ${sub.ok ? 'ok' : 'FAILED: ' + sub.error}`)
+
+    back(`session=${await createSession(igId)}`)
+  } catch (e) {
+    console.error('[AUTH] Instagram OAuth failed:', graphError(e))
     back(`auth_error=${encodeURIComponent(graphError(e))}`)
   }
 })
@@ -763,25 +931,26 @@ app.get('/api/account/status', requireAuth, async (req, res) => {
 
 // POST /api/account/subscribe — retry installing the app on the Page
 app.post('/api/account/subscribe', requireAuth, async (req, res) => {
-  const result = await subscribePage(req.account.page_id, req.account.page_token)
+  const result = await subscribeAccount(req.account)
   res.status(result.ok ? 200 : 502).json(result)
 })
 
 // DELETE /api/account — disconnect and delete all of this account's data
 app.delete('/api/account', requireAuth, async (req, res) => {
   try {
-    await axios.delete(`${IG_BASE}/${req.account.page_id}/subscribed_apps`, { params: { access_token: req.account.page_token }, timeout: 10000 })
+    await unsubscribeAccount(req.account)
   } catch (e) { console.warn('[ACCOUNT] unsubscribe failed:', graphError(e)) }
   must(await db().from('accounts').delete().eq('ig_account_id', req.account.ig_account_id))
   res.json({ success: true })
 })
 
-// Meta signed_request (deauthorize + data deletion callbacks)
-function parseSignedRequest(signedRequest) {
-  if (!META_APP_SECRET || !signedRequest) return null
+// Meta signed_request (deauthorize + data deletion callbacks). Instagram Login callbacks are
+// signed with the Instagram app secret and carry the Instagram user ID.
+function parseSignedRequest(signedRequest, secret = META_APP_SECRET) {
+  if (!secret || !signedRequest) return null
   const [sig, payload] = signedRequest.split('.')
   if (!sig || !payload) return null
-  const expected = crypto.createHmac('sha256', META_APP_SECRET).update(payload).digest('base64url')
+  const expected = crypto.createHmac('sha256', secret).update(payload).digest('base64url')
   if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null
   try { return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) } catch { return null }
 }
@@ -807,8 +976,29 @@ app.post('/api/meta/data-deletion', async (req, res) => {
   res.json({ url: `${PUBLIC_URL}/api/meta/deletion-status?code=${code}`, confirmation_code: code })
 })
 
+async function deleteInstagramUserData(igUserId) {
+  must(await db().from('accounts').delete().eq('ig_account_id', String(igUserId)).eq('login_type', 'instagram'))
+}
+
+app.post('/api/meta/instagram/deauthorize', async (req, res) => {
+  const data = parseSignedRequest(req.body.signed_request, INSTAGRAM_APP_SECRET)
+  if (!data?.user_id) return res.status(400).json({ error: 'Invalid signed_request' })
+  await deleteInstagramUserData(data.user_id)
+  console.log(`[META] Instagram user ${data.user_id} deauthorized`)
+  res.json({ success: true })
+})
+
+app.post('/api/meta/instagram/data-deletion', async (req, res) => {
+  const data = parseSignedRequest(req.body.signed_request, INSTAGRAM_APP_SECRET)
+  if (!data?.user_id) return res.status(400).json({ error: 'Invalid signed_request' })
+  await deleteInstagramUserData(data.user_id)
+  const code = sha256(`ig:${data.user_id}:${Date.now()}`).slice(0, 16)
+  console.log(`[META] data deletion for Instagram user ${data.user_id}, code ${code}`)
+  res.json({ url: `${PUBLIC_URL}/api/meta/deletion-status?code=${code}`, confirmation_code: code })
+})
+
 app.get('/api/meta/deletion-status', (req, res) => {
-  res.json({ confirmation_code: req.query.code || null, status: 'All data for this Facebook user has been deleted.' })
+  res.json({ confirmation_code: req.query.code || null, status: 'All data for this user has been deleted.' })
 })
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
@@ -821,10 +1011,12 @@ app.get('/api/health', (req, res) => {
     ok: true,
     supabase_connected: SUPABASE_READY,
     oauth_configured: !!META_APP_SECRET,
+    instagram_login_configured: !!(INSTAGRAM_APP_ID && INSTAGRAM_APP_SECRET),
     owner_account_configured: !!(OWNER_TOKEN && OWNER_IG_ID),
     issues: [
       !SUPABASE_READY && 'SUPABASE_URL / SUPABASE key not set',
       !META_APP_SECRET && 'META_APP_SECRET not set — "Connect Instagram" login is disabled',
+      !(INSTAGRAM_APP_ID && INSTAGRAM_APP_SECRET) && 'INSTAGRAM_APP_ID / INSTAGRAM_APP_SECRET not set — "Login with Instagram" is disabled',
     ].filter(Boolean)
   })
 })
@@ -832,7 +1024,7 @@ app.get('/api/health', (req, res) => {
 // ─── ACCOUNT API (requires sign-in) ───────────────────────────────────────────
 
 async function fetchPosts(account) {
-  const { data } = await axios.get(`${IG_BASE}/${account.ig_account_id}/media`, {
+  const { data } = await axios.get(`${graphBase(account)}/${account.ig_account_id}/media`, {
     params: { fields: 'id,caption,media_type,thumbnail_url,media_url,permalink,timestamp', limit: 50, access_token: account.page_token },
     timeout: 10000
   })
