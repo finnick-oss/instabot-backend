@@ -548,14 +548,16 @@ test('X-Hub-Signature-256 is checked against the app secret', async () => {
 // ─── Instagram Login ──────────────────────────────────────────────────────────
 
 // Connect a creator through Business Login for Instagram and return their session token
-async function connectViaInstagram({ igId = '17841400000000001', username = 'ig_only', permissions = 'instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments', expiresIn = 5184000 } = {}) {
+async function connectViaInstagram({ igId = '17841400000000001', username = 'ig_only', permissions = 'instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments', expiresIn = 5184000, rejectGetExchange = false } = {}) {
   route('POST', 'https://api.instagram.com/oauth/access_token', ({ body }) =>
     body.code === 'IG_CODE' && body.client_id === 'IG_APP_1' && body.client_secret === 'test_ig_secret' &&
     body.grant_type === 'authorization_code' && body.redirect_uri === 'https://api.example.test/api/auth/instagram/callback'
       ? { data: [{ access_token: 'IG_SHORT', user_id: 'APP_SCOPED_ID', permissions }] } : fail('bad code exchange'))
+  const exchange = (fields) => fields.grant_type === 'ig_exchange_token' && fields.access_token === 'IG_SHORT' && fields.client_secret === 'test_ig_secret'
+    ? { access_token: 'IG_LONG', token_type: 'bearer', expires_in: expiresIn } : fail('bad exchange')
   route('GET', 'https://graph.instagram.com/access_token', ({ params }) =>
-    params.grant_type === 'ig_exchange_token' && params.access_token === 'IG_SHORT' && params.client_secret === 'test_ig_secret'
-      ? { access_token: 'IG_LONG', token_type: 'bearer', expires_in: expiresIn } : fail('bad exchange'))
+    rejectGetExchange ? fail('Unsupported request - method type: get') : exchange(params))
+  route('POST', 'https://graph.instagram.com/access_token', ({ body }) => exchange(body))
   route('GET', 'ig:/me', ({ params }) => params.access_token === 'IG_LONG'
     ? { id: 'APP_SCOPED_ID', user_id: igId, username, name: 'IG Only', profile_picture_url: 'https://img/ig.jpg', account_type: 'BUSINESS' }
     : fail('bad token'))
@@ -629,6 +631,12 @@ test('Instagram Login accounts reply and DM through graph.instagram.com with the
   const link = callsTo('POST', `ig:/${igId}/messages`)[1]
   assert.deepEqual(link.body.recipient, { id: 'USER_X' })
   assert.match(JSON.stringify(link.body.message), /guide\.pdf/)
+})
+
+test('Instagram token exchange falls back to POST when GET is rejected', async () => {
+  const token = sessionFrom(await connectViaInstagram({ igId: '17841400000000002', username: 'post_only', rejectGetExchange: true }))
+  assert.equal((await http('GET', '/api/me', { token })).json.username, 'post_only')
+  assert.equal(callsTo('POST', 'https://graph.instagram.com/access_token').length, 1)
 })
 
 test('Instagram tokens close to expiry are refreshed before use', async () => {
