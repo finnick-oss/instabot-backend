@@ -299,7 +299,6 @@ test('comment → public reply + opening DM with a "Send me the link" button; th
   await http('POST', '/webhook', { body: messagingEvent('IG_B', { sender: { id: 'USER_X' }, recipient: { id: 'IG_B' }, postback: { payload: 'SEND_LINK' } }) })
   const link = callsTo('POST', '/PAGE_B/messages')[1]
   assert.deepEqual(link.body.recipient, { id: 'USER_X' })
-  // Desktop web shows no buttons, so the link is in the text too
   assert.equal(link.body.message.attachment.payload.text, 'Here you go 🎁', 'the link lives on the button only')
   assert.deepEqual(link.body.message.attachment.payload.buttons, [{ type: 'web_url', url: 'https://example.com/guide.pdf', title: 'Get the PDF' }])
 
@@ -369,6 +368,18 @@ test('a failed DM is recorded with the Graph error', async () => {
   assert.equal(data.dm_sent, false)
   assert.match(data.dm_error, /Insufficient permission/)
   assert.ok(data.comment_replied)
+})
+
+test('an "unknown error" on the button DM counts as sent, without a duplicate text DM', async () => {
+  const b = await connectViaOAuth()
+  await http('PUT', '/api/automations/a1', { token: b, body: valueAutomation() })
+  route('POST', '/PAGE_B/messages', () => fail('An unknown error has occurred.'))
+
+  await http('POST', '/webhook', { body: commentEvent('IG_B') })
+  const dms = callsTo('POST', '/PAGE_B/messages')
+  assert.equal(dms.length, 1, 'no plain-text fallback after an unknown error')
+  assert.ok(dms[0].body.message.attachment)
+  assert.equal(fake.rows('interactions')[0].data.awaiting_start, true, 'the button tap still continues the flow')
 })
 
 test('follow gate: opening DM, then follow buttons, then the link only after the follow is confirmed', async () => {

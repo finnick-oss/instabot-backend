@@ -257,12 +257,20 @@ function buttonTemplate(text, buttons) {
   return { attachment: { type: 'template', payload: { template_type: 'button', text: text.slice(0, 640), buttons } } }
 }
 
+// graph.instagram.com sometimes answers a send with "An unknown error has occurred" (code 1)
+// even though the message was delivered, so a retry would show up as a duplicate
+const isUnknownSendError = (e) => e.response?.data?.error?.code === 1 || /unknown error/i.test(graphError(e))
+
 // Send a button template; if the API rejects it, fall back to plain text
 async function sendWithButtons(account, recipient, text, buttons, fallbackText) {
   try {
     await sendMessage(account, recipient, buttonTemplate(text, buttons))
     return { ok: true, format: 'buttons' }
   } catch (e) {
+    if (isUnknownSendError(e)) {
+      console.warn('[DM] Instagram reported an unknown error for the button message; treating it as sent:', graphError(e))
+      return { ok: true, format: 'buttons', warning: graphError(e) }
+    }
     console.warn('[DM] button template failed, sending text:', graphError(e))
     try {
       await sendMessage(account, recipient, { text: fallbackText })
